@@ -334,23 +334,24 @@ config.keys = {
     action = wezterm.action.SpawnWindow,
   },
 
-  -- Cmd+W: close current pane (smart)
+  -- Cmd+W: close tab when possible; hide app when it is the last tab
   {
     key = 'w',
     mods = 'CMD',
     action = wezterm.action_callback(function(win, pane)
-      local tab = win:active_tab()
-      if #tab:panes() > 1 then
-        win:perform_action(wezterm.action.CloseCurrentPane { confirm = false }, pane)
-      else
+      local mux_win = win:mux_window()
+      local tabs = mux_win and mux_win:tabs() or {}
+      if #tabs > 1 then
         win:perform_action(wezterm.action.CloseCurrentTab { confirm = false }, pane)
+      else
+        win:perform_action(wezterm.action.HideApplication, pane)
       end
     end),
   },
 
   -- Cmd+Shift+W: close current tab
   {
-    key = 'W',
+    key = 'w',
     mods = 'CMD|SHIFT',
     action = wezterm.action.CloseCurrentTab({ confirm = false }),
   },

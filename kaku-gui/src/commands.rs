@@ -454,8 +454,11 @@ impl CommandDef {
                         ));
                         menu.add_item(&about_item);
 
-                        let settings_item =
-                            MenuItem::new_with("Settings...", Some(kaku_perform_key_assignment_sel), ",");
+                        let settings_item = MenuItem::new_with(
+                            "Settings...",
+                            Some(kaku_perform_key_assignment_sel),
+                            ",",
+                        );
                         settings_item
                             .set_key_equiv_modifier_mask(NSEventModifierFlags::NSCommandKeyMask);
                         settings_item.set_tool_tip("Open and edit user kaku.lua");
