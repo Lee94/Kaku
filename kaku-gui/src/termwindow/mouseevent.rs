@@ -300,17 +300,10 @@ impl super::TermWindow {
             match mux.get_tab(state.tab_id) {
                 Some(tab) => tab,
                 None => {
-                    // Tab was closed mid-drag; clear stale state and
-                    // fall back to the current active tab.
+                    // The original tab was closed mid-drag. End this drag
+                    // instead of retargeting another tab with stale split metadata.
                     self.split_drag_state = None;
-                    let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
-                        Some(tab) => tab,
-                        None => return,
-                    };
-                    self.split_drag_state = Some(super::SplitDragState {
-                        tab_id: tab.tab_id(),
-                    });
-                    tab
+                    return;
                 }
             }
         } else {
@@ -807,10 +800,16 @@ impl super::TermWindow {
             (resize_zone_pt * self.dimensions.dpi / base_dpi).max(resize_zone_pt) as isize;
         let near_window_edge = event.coords.x < resize_zone
             || (event.coords.x as usize)
-                >= self.dimensions.pixel_width.saturating_sub(resize_zone as usize)
+                >= self
+                    .dimensions
+                    .pixel_width
+                    .saturating_sub(resize_zone as usize)
             || event.coords.y < resize_zone
             || (event.coords.y as usize)
-                >= self.dimensions.pixel_height.saturating_sub(resize_zone as usize);
+                >= self
+                    .dimensions
+                    .pixel_height
+                    .saturating_sub(resize_zone as usize);
 
         if capture_mouse && !near_window_edge {
             self.current_mouse_capture = Some(MouseCapture::TerminalPane(pane.pane_id()));

@@ -55,9 +55,7 @@ pub fn show_line_prompt_overlay(
 ) -> anyhow::Result<()> {
     let name = match *args.action {
         KeyAssignment::EmitEvent(id) => id,
-        _ => anyhow::bail!(
-            "PromptInputLine requires action to be defined by action_callback"
-        ),
+        _ => anyhow::bail!("PromptInputLine requires action to be defined by action_callback"),
     };
 
     term.no_grab_mouse_in_raw_mode();

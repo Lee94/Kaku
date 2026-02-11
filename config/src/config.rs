@@ -1030,9 +1030,9 @@ impl Config {
         if cfg!(target_os = "macos") {
             if let Ok(exe_name) = std::env::current_exe() {
                 if let Some(contents_dir) = exe_name.parent().and_then(|p| p.parent()) {
-                    paths.push(
-                        PathPossibility::optional(contents_dir.join("Resources").join("kaku.lua")),
-                    );
+                    paths.push(PathPossibility::optional(
+                        contents_dir.join("Resources").join("kaku.lua"),
+                    ));
                 }
             }
         }

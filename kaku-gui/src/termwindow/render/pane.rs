@@ -137,13 +137,15 @@ impl crate::TermWindow {
             // Calculate the width - respect right padding
             let width = if pos.left + pos.width >= self.terminal_size.cols as usize {
                 // Right-most pane: extend to split center but respect window padding
-                let padding_right = self.config.window_padding.right.evaluate_as_pixels(
-                    DimensionContext {
-                        dpi: self.dimensions.dpi as f32,
-                        pixel_max: self.terminal_size.pixel_width as f32,
-                        pixel_cell: cell_width,
-                    },
-                );
+                let padding_right =
+                    self.config
+                        .window_padding
+                        .right
+                        .evaluate_as_pixels(DimensionContext {
+                            dpi: self.dimensions.dpi as f32,
+                            pixel_max: self.terminal_size.pixel_width as f32,
+                            pixel_cell: cell_width,
+                        });
                 self.dimensions.pixel_width as f32 - x - padding_right - border.right.get() as f32
             } else {
                 (pos.width as f32 * cell_width) + width_delta
@@ -152,14 +154,20 @@ impl crate::TermWindow {
             // Calculate the height - respect bottom padding
             let height = if pos.top + pos.height >= self.terminal_size.rows as usize {
                 // Bottom-most pane: extend to split center but respect window padding
-                let padding_bottom = self.config.window_padding.bottom.evaluate_as_pixels(
-                    DimensionContext {
-                        dpi: self.dimensions.dpi as f32,
-                        pixel_max: self.terminal_size.pixel_height as f32,
-                        pixel_cell: cell_height,
-                    },
-                );
-                self.dimensions.pixel_height as f32 - y - padding_bottom - bottom_bar_height - border.bottom.get() as f32
+                let padding_bottom =
+                    self.config
+                        .window_padding
+                        .bottom
+                        .evaluate_as_pixels(DimensionContext {
+                            dpi: self.dimensions.dpi as f32,
+                            pixel_max: self.terminal_size.pixel_height as f32,
+                            pixel_cell: cell_height,
+                        });
+                self.dimensions.pixel_height as f32
+                    - y
+                    - padding_bottom
+                    - bottom_bar_height
+                    - border.bottom.get() as f32
             } else {
                 (pos.height as f32 * cell_height) + height_delta as f32
             };
@@ -355,13 +363,15 @@ impl crate::TermWindow {
             }
 
             // Use the same padding as window padding for split lines
-            let split_padding_value = self.config.window_padding.left.evaluate_as_pixels(
-                DimensionContext {
-                    dpi: self.dimensions.dpi as f32,
-                    pixel_max: self.terminal_size.pixel_width as f32,
-                    pixel_cell: cell_width,
-                },
-            );
+            let split_padding_value =
+                self.config
+                    .window_padding
+                    .left
+                    .evaluate_as_pixels(DimensionContext {
+                        dpi: self.dimensions.dpi as f32,
+                        pixel_max: self.terminal_size.pixel_width as f32,
+                        pixel_cell: cell_width,
+                    });
 
             // Add padding when there's a split line on the left
             let left_split_padding = if pos.left > 0 {
@@ -385,9 +395,8 @@ impl crate::TermWindow {
                 + left_split_padding;
 
             // Calculate content width accounting for split line paddings
-            let content_pixel_width = (pos.width as f32 * cell_width)
-                - left_split_padding
-                - right_split_padding;
+            let content_pixel_width =
+                (pos.width as f32 * cell_width) - left_split_padding - right_split_padding;
 
             let mut render = LineRender {
                 term_window: self,
@@ -679,13 +688,15 @@ impl crate::TermWindow {
         // Calculate the width - respect right padding
         let width = if pos.left + pos.width >= self.terminal_size.cols as usize {
             // Right-most pane: extend to split center but respect window padding
-            let padding_right = self.config.window_padding.right.evaluate_as_pixels(
-                DimensionContext {
-                    dpi: self.dimensions.dpi as f32,
-                    pixel_max: self.terminal_size.pixel_width as f32,
-                    pixel_cell: cell_width,
-                },
-            );
+            let padding_right =
+                self.config
+                    .window_padding
+                    .right
+                    .evaluate_as_pixels(DimensionContext {
+                        dpi: self.dimensions.dpi as f32,
+                        pixel_max: self.terminal_size.pixel_width as f32,
+                        pixel_cell: cell_width,
+                    });
             self.dimensions.pixel_width as f32 - x - padding_right - border.right.get() as f32
         } else {
             (pos.width as f32 * cell_width) + width_delta
@@ -694,14 +705,20 @@ impl crate::TermWindow {
         // Calculate the height - respect bottom padding
         let height = if pos.top + pos.height >= self.terminal_size.rows as usize {
             // Bottom-most pane: extend to split center but respect window padding
-            let padding_bottom = self.config.window_padding.bottom.evaluate_as_pixels(
-                DimensionContext {
-                    dpi: self.dimensions.dpi as f32,
-                    pixel_max: self.terminal_size.pixel_height as f32,
-                    pixel_cell: cell_height,
-                },
-            );
-            self.dimensions.pixel_height as f32 - y - padding_bottom - bottom_bar_height - border.bottom.get() as f32
+            let padding_bottom =
+                self.config
+                    .window_padding
+                    .bottom
+                    .evaluate_as_pixels(DimensionContext {
+                        dpi: self.dimensions.dpi as f32,
+                        pixel_max: self.terminal_size.pixel_height as f32,
+                        pixel_cell: cell_height,
+                    });
+            self.dimensions.pixel_height as f32
+                - y
+                - padding_bottom
+                - bottom_bar_height
+                - border.bottom.get() as f32
         } else {
             (pos.height as f32 * cell_height) + height_delta as f32
         };
@@ -709,21 +726,25 @@ impl crate::TermWindow {
         let background_rect = euclid::rect(x, y, width, height);
 
         // Use the same padding as window padding for split lines
-        let horizontal_split_padding = self.config.window_padding.left.evaluate_as_pixels(
-            DimensionContext {
-                dpi: self.dimensions.dpi as f32,
-                pixel_max: self.terminal_size.pixel_width as f32,
-                pixel_cell: cell_width,
-            },
-        );
+        let horizontal_split_padding =
+            self.config
+                .window_padding
+                .left
+                .evaluate_as_pixels(DimensionContext {
+                    dpi: self.dimensions.dpi as f32,
+                    pixel_max: self.terminal_size.pixel_width as f32,
+                    pixel_cell: cell_width,
+                });
 
-        let vertical_split_padding = self.config.window_padding.top.evaluate_as_pixels(
-            DimensionContext {
-                dpi: self.dimensions.dpi as f32,
-                pixel_max: self.terminal_size.pixel_height as f32,
-                pixel_cell: cell_height,
-            },
-        );
+        let vertical_split_padding =
+            self.config
+                .window_padding
+                .top
+                .evaluate_as_pixels(DimensionContext {
+                    dpi: self.dimensions.dpi as f32,
+                    pixel_max: self.terminal_size.pixel_height as f32,
+                    pixel_cell: cell_height,
+                });
 
         // Add padding when there's a split line on the left
         let left_split_padding = if pos.left > 0 {
@@ -758,8 +779,7 @@ impl crate::TermWindow {
             padding_left + border.left.get() as f32 - (cell_width / 2.0)
                 + (pos.left as f32 * cell_width)
                 + left_split_padding,
-            top_pixel_y + (pos.top as f32 * cell_height) - (cell_height / 2.0)
-                + top_split_padding,
+            top_pixel_y + (pos.top as f32 * cell_height) - (cell_height / 2.0) + top_split_padding,
             (pos.width as f32 * cell_width) - left_split_padding - right_split_padding,
             (pos.height as f32 * cell_height) - top_split_padding - bottom_split_padding,
         );

@@ -319,9 +319,7 @@ impl WebGpuState {
         log::trace!("caps: {caps:?}");
         let downlevel_caps = adapter.get_downlevel_capabilities();
         log::trace!("downlevel_caps: {downlevel_caps:?}");
-        let supports_mailbox = caps
-            .present_modes
-            .contains(&wgpu::PresentMode::Mailbox);
+        let supports_mailbox = caps.present_modes.contains(&wgpu::PresentMode::Mailbox);
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -551,8 +549,7 @@ impl WebGpuState {
                 use cocoa::appkit::NSView;
                 let ns_view = h.ns_view.as_ptr() as cocoa::base::id;
                 let frame = unsafe { NSView::frame(ns_view) };
-                let backing_frame =
-                    unsafe { NSView::convertRectToBacking(ns_view, frame) };
+                let backing_frame = unsafe { NSView::convertRectToBacking(ns_view, frame) };
                 dims.pixel_width = backing_frame.size.width as usize;
                 dims.pixel_height = backing_frame.size.height as usize;
             }
