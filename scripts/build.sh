@@ -205,7 +205,7 @@ else
 		echo "Release build: using ad-hoc signing (set KAKU_SIGNING_IDENTITY for developer certificate)"
 	fi
 fi
-codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP_BUNDLE_OUT"
+codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$APP_BUNDLE_OUT"
 
 touch "$APP_BUNDLE_OUT/Contents/Resources/terminal.icns"
 touch "$APP_BUNDLE_OUT/Contents/Info.plist"
