@@ -25,13 +25,12 @@
 - **Built-in Shell Suite**: Comes pre-loaded with Starship, z, Delta, syntax highlighting, autosuggestions, and autocompletions.
 - **Fast & Lightweight**: 40% smaller binary, instant startup, lazy loading, stripped-down GPU-accelerated core.
 - **Lua Scripting**: Retains the full power of WezTerm's Lua engine for infinite customization.
-- **Safe Update Flow**: Built-in updater (`kaku update`) plus Homebrew-aware upgrade path.
 
 ## Quick Start
 
 1. [Download Kaku DMG](https://github.com/tw93/Kaku/releases/latest) & Drag to Applications
-2. Or install with Homebrew: `brew tap tw93/tap && brew install --cask tw93/tap/kaku`
-3. Open Kaku. If macOS blocks the app, go to System Settings → Privacy & Security → click "Open Anyway"
+2. Or install with Homebrew: `brew install tw93/tap/kaku`
+3. Open Kaku. Signed with Apple Developer ID for smooth first-launch experience
 4. On first launch, Kaku will automatically set up your shell environment
 
 ## Usage Guide
