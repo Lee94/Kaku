@@ -96,7 +96,7 @@ WezTerm 强大且可扩展，我非常感谢它的引擎。但我想要一个开
 
 **为什么 Homebrew cask 叫 `kakuku` 而不是 `kaku`？**
 
-因为 `kaku` 与 Homebrew 官方仓库中的另一个软件冲突，`kakuku` 是一个可爱又好记的名字
+因为 `kaku` 与 Homebrew 官方仓库中的另一个软件冲突，用户在 update 的时候会更新到这个同名软件，我认为 `kakuku` 也可爱好记
 
 **有 Windows 或 Linux 版本吗？**
 
