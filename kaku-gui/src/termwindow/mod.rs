@@ -2677,6 +2677,10 @@ impl TermWindow {
             .unwrap_or(dims.physical_top) as f64
             + (amount * dims.viewport_rows as f64);
         self.set_viewport(pane.pane_id(), Some(position as isize), dims);
+        // 滚到底部时退出 peek 模式
+        if pane.is_primary_peek() && self.get_viewport(pane.pane_id()).is_none() {
+            pane.set_primary_peek(false);
+        }
         if let Some(win) = self.window.as_ref() {
             win.invalidate();
         }

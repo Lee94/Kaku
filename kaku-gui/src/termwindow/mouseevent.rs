@@ -730,6 +730,10 @@ impl super::TermWindow {
                 ),
                 dims,
             );
+            // 滚到底部时退出 peek 模式
+            if pane.is_primary_peek() && self.get_viewport(pane.pane_id()).is_none() {
+                pane.set_primary_peek(false);
+            }
             context.invalidate();
         }
         context.set_cursor(Some(MouseCursor::Arrow));
