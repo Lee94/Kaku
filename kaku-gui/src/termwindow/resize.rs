@@ -50,9 +50,9 @@ impl super::TermWindow {
         let last_state = self.window_state;
         self.window_state = window_state;
         self.quad_generation += 1;
-        if last_state != self.window_state {
-            self.load_os_parameters();
-        }
+        // Refresh per-screen OS parameters (eg: safe-area/border metrics)
+        // on each resize so dragging between monitors doesn't use stale values.
+        self.load_os_parameters();
         let fullscreen_transition = last_state.contains(WindowState::FULL_SCREEN)
             != self.window_state.contains(WindowState::FULL_SCREEN);
 

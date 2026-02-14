@@ -1070,12 +1070,21 @@ impl WindowOps for Window {
             && !config.macos_fullscreen_extend_behind_notch;
 
         let border_dimensions = if should_apply_notch_padding {
-            let main_screen = unsafe { NSScreen::mainScreen(nil) };
-            let screen_frame = unsafe { NSScreen::frame(main_screen) };
+            let screen = unsafe {
+                let window_screen: id = msg_send![self.ns_window, screen];
+                if window_screen.is_null() {
+                    NSScreen::mainScreen(nil)
+                } else {
+                    window_screen
+                }
+            };
 
-            if let Some(insets) = get_screen_safe_area_insets(main_screen) {
+            if screen.is_null() {
+                None
+            } else if let Some(insets) = get_screen_safe_area_insets(screen) {
+                let screen_frame = unsafe { NSScreen::frame(screen) };
                 let scale = unsafe {
-                    let backing_frame = NSScreen::convertRectToBacking_(main_screen, screen_frame);
+                    let backing_frame = NSScreen::convertRectToBacking_(screen, screen_frame);
                     backing_frame.size.height / screen_frame.size.height
                 };
 
