@@ -3,8 +3,9 @@ use crate::TermWindow;
 use config::keyassignment::{ClipboardCopyDestination, ClipboardPasteSource};
 use mux::pane::Pane;
 use mux::Mux;
+use std::path::PathBuf;
 use std::sync::Arc;
-use window::{Clipboard, WindowOps};
+use window::{Clipboard, ClipboardData, WindowOps};
 
 impl TermWindow {
     pub fn copy_to_clipboard(&self, clipboard: ClipboardCopyDestination, text: String) {
@@ -35,26 +36,66 @@ impl TermWindow {
             ClipboardPasteSource::Clipboard => Clipboard::Clipboard,
             ClipboardPasteSource::PrimarySelection => Clipboard::PrimarySelection,
         };
-        let future = window.get_clipboard(clipboard);
+        let quote_dropped_files = self.config.quote_dropped_files;
+        let future = window.get_clipboard_data(clipboard);
         promise::spawn::spawn(async move {
-            if let Ok(clip) = future.await {
-                window.notify(TermWindowNotif::Apply(Box::new(move |myself| {
-                    if let Some(pane) = myself
-                        .pane_state(pane_id)
-                        .overlay
-                        .as_ref()
-                        .map(|overlay| overlay.pane.clone())
-                        .or_else(|| {
-                            let mux = Mux::get();
-                            mux.get_pane(pane_id)
-                        })
-                    {
-                        pane.send_paste(&clip).ok();
-                    }
-                })));
+            match future.await {
+                Ok(data) => {
+                    window.notify(TermWindowNotif::Apply(Box::new(move |myself| {
+                        let clip = match data_to_paste_string(data, quote_dropped_files) {
+                            Some(clip) => clip,
+                            None => return,
+                        };
+
+                        if let Some(pane) = myself
+                            .pane_state(pane_id)
+                            .overlay
+                            .as_ref()
+                            .map(|overlay| overlay.pane.clone())
+                            .or_else(|| {
+                                let mux = Mux::get();
+                                mux.get_pane(pane_id)
+                            })
+                        {
+                            if let Err(err) = pane.send_paste(&clip) {
+                                log::warn!("failed to paste clipboard content into pane {pane_id}: {err:#}");
+                            }
+                        }
+                    })));
+                }
+                Err(err) => {
+                    log::warn!("failed to read clipboard for pane {pane_id}: {err:#}");
+                }
             }
         })
         .detach();
         self.maybe_scroll_to_bottom_for_input(&pane);
     }
+}
+
+fn data_to_paste_string(
+    data: ClipboardData,
+    quote_dropped_files: config::DroppedFileQuoting,
+) -> Option<String> {
+    match data {
+        ClipboardData::Text(text) => Some(text),
+        ClipboardData::Files(paths) => {
+            if paths.is_empty() {
+                return None;
+            }
+            Some(format_dropped_paths(paths, quote_dropped_files))
+        }
+    }
+}
+
+fn format_dropped_paths(
+    paths: Vec<PathBuf>,
+    quote_dropped_files: config::DroppedFileQuoting,
+) -> String {
+    paths
+        .iter()
+        .map(|path| quote_dropped_files.escape(&path.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ")
+        + " "
 }

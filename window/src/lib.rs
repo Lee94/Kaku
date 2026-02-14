@@ -44,6 +44,12 @@ pub enum Clipboard {
     PrimarySelection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardData {
+    Text(String),
+    Files(Vec<PathBuf>),
+}
+
 impl Default for Clipboard {
     fn default() -> Self {
         Self::Clipboard
@@ -315,6 +321,8 @@ pub trait WindowOps {
 
     /// Initiate textual transfer from the clipboard
     fn get_clipboard(&self, clipboard: Clipboard) -> Future<String>;
+
+    fn get_clipboard_data(&self, clipboard: Clipboard) -> Future<ClipboardData>;
 
     /// Set some text in the clipboard
     fn set_clipboard(&self, clipboard: Clipboard, text: String);

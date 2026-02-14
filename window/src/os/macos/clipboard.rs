@@ -1,7 +1,18 @@
 use crate::macos::{nsstring, nsstring_to_str};
+use crate::ClipboardData;
 use cocoa::appkit::{NSFilenamesPboardType, NSPasteboard, NSStringPboardType};
 use cocoa::base::*;
 use cocoa::foundation::NSArray;
+use objc::*;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const PNG_PASTEBOARD_TYPE: &str = "public.png";
+const TIFF_PASTEBOARD_TYPE: &str = "public.tiff";
+const MAX_CLIPBOARD_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const CLIPBOARD_IMAGE_DIR: &str = "clipboard-images";
 
 pub struct Clipboard {
     pasteboard: id,
@@ -16,26 +27,109 @@ impl Clipboard {
         Clipboard { pasteboard }
     }
 
-    pub fn read(&self) -> anyhow::Result<String> {
+    fn read_image_data(&self) -> anyhow::Result<Option<(Vec<u8>, &'static str)>> {
+        unsafe {
+            for (uti, extension) in [(PNG_PASTEBOARD_TYPE, "png"), (TIFF_PASTEBOARD_TYPE, "tiff")] {
+                let data: id = msg_send![self.pasteboard, dataForType:*nsstring(uti)];
+                if data.is_null() {
+                    continue;
+                }
+
+                let len: usize = msg_send![data, length];
+                if len == 0 {
+                    continue;
+                }
+                anyhow::ensure!(
+                    len <= MAX_CLIPBOARD_IMAGE_BYTES,
+                    "clipboard image exceeds {} bytes",
+                    MAX_CLIPBOARD_IMAGE_BYTES
+                );
+
+                let bytes: *const u8 = msg_send![data, bytes];
+                anyhow::ensure!(!bytes.is_null(), "clipboard image bytes returned null");
+
+                let data = std::slice::from_raw_parts(bytes, len).to_vec();
+                return Ok(Some((data, extension)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn write_image_to_runtime_dir(
+        &self,
+        image_data: &[u8],
+        extension: &str,
+    ) -> anyhow::Result<PathBuf> {
+        let dir = config::RUNTIME_DIR.join(CLIPBOARD_IMAGE_DIR);
+        config::create_user_owned_dirs(&dir)?;
+
+        let pid = std::process::id();
+        for attempt in 0..64u32 {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let file_name = format!("clipboard-image-{pid}-{now}-{attempt}.{extension}");
+            let path = dir.join(file_name);
+
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+
+            match options.open(&path) {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(image_data)?;
+                    return Ok(path);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        anyhow::bail!("failed to allocate unique clipboard image path")
+    }
+
+    pub fn read_data(&self) -> anyhow::Result<ClipboardData> {
         unsafe {
             let plist = self.pasteboard.propertyListForType(NSFilenamesPboardType);
             if !plist.is_null() {
                 let mut filenames = vec![];
                 for i in 0..plist.count() {
-                    filenames.push(
-                        shlex::try_quote(nsstring_to_str(plist.objectAtIndex(i)))
-                            .unwrap_or_else(|_| "".into()),
-                    );
+                    filenames.push(PathBuf::from(nsstring_to_str(plist.objectAtIndex(i))));
                 }
-                return Ok(filenames.join(" "));
+                return Ok(ClipboardData::Files(filenames));
             }
             let s = self.pasteboard.stringForType(NSStringPboardType);
             if !s.is_null() {
                 let str = nsstring_to_str(s);
-                return Ok(str.to_string());
+                return Ok(ClipboardData::Text(str.to_string()));
             }
         }
+
+        if let Some((image_data, extension)) = self.read_image_data()? {
+            let path = self.write_image_to_runtime_dir(&image_data, extension)?;
+            return Ok(ClipboardData::Files(vec![path]));
+        }
+
         anyhow::bail!("pasteboard read returned empty");
+    }
+
+    pub fn read(&self) -> anyhow::Result<String> {
+        match self.read_data()? {
+            ClipboardData::Text(text) => Ok(text),
+            ClipboardData::Files(paths) => {
+                let quoted = paths
+                    .iter()
+                    .map(|path| {
+                        shlex::try_quote(path.to_string_lossy().as_ref())
+                            .unwrap_or_else(|_| "".into())
+                            .into_owned()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Ok(quoted)
+            }
+        }
     }
 
     pub fn write(&mut self, data: String) -> anyhow::Result<()> {

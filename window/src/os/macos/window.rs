@@ -8,10 +8,10 @@ use crate::connection::ConnectionOps;
 use crate::os::macos::menu::{MenuItem, RepresentedItem};
 use crate::parameters::{Border, Parameters, TitleBar};
 use crate::{
-    Clipboard, Connection, DeadKeyStatus, Dimensions, Handled, KeyCode, KeyEvent, Modifiers,
-    MouseButtons, MouseCursor, MouseEvent, MouseEventKind, MousePress, Point, RawKeyEvent, Rect,
-    RequestedWindowGeometry, ResizeIncrement, ResolvedGeometry, ScreenPoint, Size, ULength,
-    WindowDecorations, WindowEvent, WindowEventSender, WindowOps, WindowState,
+    Clipboard, ClipboardData, Connection, DeadKeyStatus, Dimensions, Handled, KeyCode, KeyEvent,
+    Modifiers, MouseButtons, MouseCursor, MouseEvent, MouseEventKind, MousePress, Point,
+    RawKeyEvent, Rect, RequestedWindowGeometry, ResizeIncrement, ResolvedGeometry, ScreenPoint,
+    Size, ULength, WindowDecorations, WindowEvent, WindowEventSender, WindowOps, WindowState,
 };
 use anyhow::{anyhow, bail, ensure};
 use async_trait::async_trait;
@@ -44,7 +44,7 @@ use raw_window_handle::{
 };
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::ffi::{CStr, c_void};
+use std::ffi::{c_void, CStr};
 use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -52,7 +52,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use wezterm_font::FontConfiguration;
-use wezterm_input_types::{IntegratedTitleButtonStyle, KeyboardLedStatus, is_ascii_control};
+use wezterm_input_types::{is_ascii_control, IntegratedTitleButtonStyle, KeyboardLedStatus};
 
 static APP_TERMINATING: AtomicBool = AtomicBool::new(false);
 
@@ -971,6 +971,14 @@ impl WindowOps for Window {
             ClipboardContext::new()
                 .read()
                 .map_err(|e| anyhow!("Failed to get clipboard:{}", e)),
+        )
+    }
+
+    fn get_clipboard_data(&self, _clipboard: Clipboard) -> Future<ClipboardData> {
+        Future::result(
+            ClipboardContext::new()
+                .read_data()
+                .map_err(|e| anyhow!("Failed to get clipboard data:{}", e)),
         )
     }
 
@@ -2160,7 +2168,11 @@ impl WindowView {
     extern "C" fn has_marked_text(this: &mut Object, _sel: Sel) -> BOOL {
         if let Some(myself) = Self::get_this(this) {
             let inner = myself.inner.borrow();
-            if inner.ime_text.is_empty() { NO } else { YES }
+            if inner.ime_text.is_empty() {
+                NO
+            } else {
+                YES
+            }
         } else {
             NO
         }
@@ -3182,7 +3194,9 @@ impl WindowView {
     extern "C" fn did_resize(this: &mut Object, _sel: Sel, _notification: id) {
         // Use try_borrow to avoid panic if already borrowed
         let in_fullscreen_transition = if let Some(this) = Self::get_this(this) {
-            this.inner.try_borrow().map_or(false, |inner| inner.in_fullscreen_transition)
+            this.inner
+                .try_borrow()
+                .map_or(false, |inner| inner.in_fullscreen_transition)
         } else {
             return;
         };
@@ -3233,7 +3247,8 @@ impl WindowView {
                 let elapsed_ms = now_ms.saturating_sub(time_ms);
                 elapsed_ms < 300
             };
-            let live_resizing = inner.live_resizing || in_fullscreen_transition || in_zoom_transition;
+            let live_resizing =
+                inner.live_resizing || in_fullscreen_transition || in_zoom_transition;
 
             // Note: isZoomed can falsely return YES in situations such as
             // the current screen changing. We cannot detect that case here.
