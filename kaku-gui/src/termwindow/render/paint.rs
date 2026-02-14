@@ -360,7 +360,7 @@ impl crate::TermWindow {
         let toast_height = metrics.cell_size.height as f32 * 1.5;
         // Use consistent margin based on cell size
         let h_margin = metrics.cell_size.width as f32 * 2.0;
-        let v_margin = metrics.cell_size.height as f32 * 1.5;
+        let v_margin = metrics.cell_size.height as f32 * 2.0;
 
         // Position at bottom-right with fixed margin from window edge
         let right_x =
