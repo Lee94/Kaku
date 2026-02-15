@@ -6,6 +6,7 @@ use config::{wezterm_version, ConfigHandle};
 use mux::Mux;
 use std::ffi::OsString;
 use std::io::{IsTerminal, Read, Write};
+use std::path::PathBuf;
 use termwiz::caps::Capabilities;
 use termwiz::escape::esc::{Esc, EscCode};
 use termwiz::escape::OneBased;
@@ -839,12 +840,9 @@ fn delegate_to_gui(saver: UmaskSaver) -> anyhow::Result<()> {
         "kaku-gui"
     };
 
-    let exe = std::env::current_exe()?
-        .parent()
-        .ok_or_else(|| anyhow!("exe has no parent dir!?"))?
-        .join(exe_name);
+    let exe = resolve_gui_executable(exe_name)?;
 
-    let mut cmd = Command::new(exe);
+    let mut cmd = Command::new(&exe);
     if cfg!(windows) {
         cmd.arg("--attach-parent-console");
     }
@@ -872,4 +870,44 @@ fn delegate_to_gui(saver: UmaskSaver) -> anyhow::Result<()> {
         let code = status.code().unwrap_or(1);
         std::process::exit(code);
     }
+}
+
+fn resolve_gui_executable(exe_name: &str) -> anyhow::Result<PathBuf> {
+    let current_exe = std::env::current_exe()?;
+    let mut candidates = Vec::new();
+
+    if let Some(parent) = current_exe.parent() {
+        candidates.push(parent.join(exe_name));
+    }
+
+    if let Ok(resolved_exe) = std::fs::canonicalize(&current_exe) {
+        if let Some(parent) = resolved_exe.parent() {
+            let resolved_candidate = parent.join(exe_name);
+            if !candidates.iter().any(|candidate| candidate == &resolved_candidate) {
+                candidates.push(resolved_candidate);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(PathBuf::from("/Applications/Kaku.app/Contents/MacOS").join(exe_name));
+        candidates.push(
+            config::HOME_DIR
+                .join("Applications")
+                .join("Kaku.app")
+                .join("Contents")
+                .join("MacOS")
+                .join(exe_name),
+        );
+    }
+
+    if let Some(path) = candidates.iter().find(|path| path.exists()) {
+        return Ok(path.clone());
+    }
+
+    candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("unable to resolve GUI executable path"))
 }

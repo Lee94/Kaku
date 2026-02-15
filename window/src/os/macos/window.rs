@@ -2465,6 +2465,25 @@ impl WindowView {
         }
     }
 
+    fn schedule_transition_unhide_repaint(window_id: usize, duration_ms: u64) {
+        promise::spawn::spawn(async move {
+            async_io::Timer::after(Duration::from_millis(duration_ms)).await;
+            Connection::with_window_inner(window_id, move |inner| {
+                if let Some(window_view) = WindowView::get_this(unsafe { &**inner.view }) {
+                    let mut state = window_view.inner.borrow_mut();
+                    state.paint_throttled = false;
+                    state.invalidated = true;
+                    state.events.dispatch(WindowEvent::NeedRepaint);
+                }
+                unsafe {
+                    let _: () = msg_send![*inner.view, setNeedsDisplay: YES];
+                }
+                Ok(())
+            });
+        })
+        .detach();
+    }
+
     // Called by the inputContext manager when the IME processes events.
     // We need to translate the selector back into appropriate key
     // sequences
@@ -3568,11 +3587,13 @@ impl WindowView {
     extern "C" fn did_exit_fullscreen(this: &mut Object, _sel: Sel, _notification: id) {
         let view_id = this as *mut Object;
         if let Some(this) = Self::get_this(this) {
+            let window_id = this.inner.borrow().window_id;
             this.native_fullscreen_transition_active.set(false);
             this.native_fullscreen_target.set(None);
             this.transition_hide_until.set(Some(
                 Instant::now() + Duration::from_millis(NATIVE_EXIT_POST_HIDE_CONTENT_MS),
             ));
+            Self::schedule_transition_unhide_repaint(window_id, NATIVE_EXIT_POST_HIDE_CONTENT_MS);
             if let Ok(mut inner) = this.inner.try_borrow_mut() {
                 inner.live_resizing = true;
             }
