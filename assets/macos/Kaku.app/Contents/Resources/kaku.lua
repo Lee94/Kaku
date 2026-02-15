@@ -727,28 +727,135 @@ wezterm.on('gui-startup', function(cmd)
   local home = os.getenv("HOME")
   local current_version = 8  -- Update this when config changes
 
-  -- Check for configuration version
-  local version_file = home .. "/.config/kaku/.kaku_config_version"
+  local state_file = home .. "/.config/kaku/state.json"
+  local legacy_version_file = home .. "/.config/kaku/.kaku_config_version"
+  local legacy_geometry_file = home .. "/.config/kaku/.kaku_window_geometry"
   local is_first_run = false
   local needs_update = false
 
-  -- Read current user version
-  local vf = io.open(version_file, "r")
-  if vf then
-    -- Has version file, check if update needed
-    local user_version = tonumber(vf:read("*all")) or 0
-    vf:close()
-    if user_version < current_version then
-      needs_update = true
+  local function ensure_state_dir()
+    os.execute("mkdir -p " .. home .. "/.config/kaku")
+  end
+
+  local function write_state(version, geometry)
+    ensure_state_dir()
+    local state = {
+      config_version = version,
+    }
+    if geometry and geometry.width and geometry.height then
+      state.window_geometry = {
+        width = geometry.width,
+        height = geometry.height,
+      }
     end
-  else
-    -- New user, show first run
+
+    local encoded = nil
+    local ok, value = pcall(wezterm.json_encode, state)
+    if ok and type(value) == "string" and value ~= "" then
+      encoded = value
+    end
+
+    local wf = io.open(state_file, "w")
+    if wf then
+      if encoded then
+        wf:write(encoded .. "\n")
+      else
+        wf:write(string.format("{\n  \"config_version\": %d\n}\n", version))
+      end
+      wf:close()
+    end
+  end
+
+  local function remove_legacy_files()
+    os.remove(legacy_version_file)
+    os.remove(legacy_geometry_file)
+  end
+
+  local function parse_legacy_geometry(raw)
+    if not raw or raw == "" then
+      return nil
+    end
+
+    local values = {}
+    for number in raw:gmatch("%d+") do
+      values[#values + 1] = tonumber(number)
+    end
+
+    if #values >= 4 then
+      return {
+        width = values[#values - 1],
+        height = values[#values],
+      }
+    elseif #values >= 2 then
+      return {
+        width = values[1],
+        height = values[2],
+      }
+    end
+
+    return nil
+  end
+
+  local function migrate_legacy_state_if_needed()
+    local existing_state = io.open(state_file, "r")
+    if existing_state then
+      existing_state:close()
+      return
+    end
+
+    local legacy_version = nil
+    local legacy_geometry = nil
+
+    local lv = io.open(legacy_version_file, "r")
+    if lv then
+      legacy_version = tonumber(lv:read("*all"))
+      lv:close()
+    end
+
+    local lg = io.open(legacy_geometry_file, "r")
+    if lg then
+      legacy_geometry = parse_legacy_geometry(lg:read("*all"))
+      lg:close()
+    end
+
+    local has_legacy_markers = legacy_version ~= nil or legacy_geometry ~= nil
+
+    if has_legacy_markers then
+      write_state(legacy_version or current_version, legacy_geometry)
+      remove_legacy_files()
+    end
+  end
+
+  migrate_legacy_state_if_needed()
+
+  local user_version = nil
+  local state_file_exists = false
+  local sf = io.open(state_file, "r")
+  if sf then
+    state_file_exists = true
+    local raw_state = sf:read("*all")
+    sf:close()
+    if raw_state and raw_state ~= "" then
+      local ok, state = pcall(wezterm.json_parse, raw_state)
+      if ok and type(state) == "table" then
+        user_version = tonumber(state.config_version)
+      end
+    end
+  end
+
+  if not state_file_exists then
     is_first_run = true
+  elseif user_version == nil then
+    -- Corrupted or manually edited state file: repair with safe defaults.
+    write_state(current_version, nil)
+    user_version = current_version
+  elseif user_version < current_version then
+    needs_update = true
   end
 
   if is_first_run then
     -- First run experience
-    os.execute("mkdir -p " .. home .. "/.config/kaku")
+    ensure_state_dir()
 
     local resource_dir = wezterm.executable_dir:gsub("MacOS/?$", "Resources")
     local first_run_script = resource_dir .. "/first_run.sh"

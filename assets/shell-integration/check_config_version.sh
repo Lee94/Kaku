@@ -9,7 +9,62 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 CURRENT_CONFIG_VERSION=8
-VERSION_FILE="$HOME/.config/kaku/.kaku_config_version"
+CONFIG_DIR="$HOME/.config/kaku"
+STATE_FILE="$CONFIG_DIR/state.json"
+LEGACY_VERSION_FILE="$CONFIG_DIR/.kaku_config_version"
+LEGACY_GEOMETRY_FILE="$CONFIG_DIR/.kaku_window_geometry"
+
+read_config_version() {
+	if [[ ! -f "$STATE_FILE" ]]; then
+		printf '%s\n' "0"
+		return
+	fi
+
+	local version
+	version="$(sed -nE 's/.*"config_version"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$STATE_FILE" | head -n 1)"
+	if [[ "$version" =~ ^[0-9]+$ ]]; then
+		printf '%s\n' "$version"
+	else
+		printf '%s\n' "0"
+	fi
+}
+
+persist_config_version() {
+	local target_version="${1:-$CURRENT_CONFIG_VERSION}"
+	mkdir -p "$CONFIG_DIR"
+
+	local width height geometry_json
+	width=""
+	height=""
+	geometry_json=""
+
+	if [[ -f "$STATE_FILE" ]]; then
+		width="$(sed -nE 's/.*"width"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$STATE_FILE" | head -n 1)"
+		height="$(sed -nE 's/.*"height"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$STATE_FILE" | head -n 1)"
+	fi
+
+	if [[ -z "$width" || -z "$height" ]] && [[ -f "$LEGACY_GEOMETRY_FILE" ]]; then
+		local geometry
+		geometry="$(tr -d '[:space:]' < "$LEGACY_GEOMETRY_FILE" || true)"
+		local a b c d
+		IFS=',' read -r a b c d <<< "$geometry"
+		if [[ "${c:-}" =~ ^[0-9]+$ && "${d:-}" =~ ^[0-9]+$ ]]; then
+			width="$c"
+			height="$d"
+		elif [[ "${a:-}" =~ ^[0-9]+$ && "${b:-}" =~ ^[0-9]+$ ]]; then
+			width="$a"
+			height="$b"
+		fi
+	fi
+
+	if [[ -n "$width" && -n "$height" ]]; then
+		geometry_json="$(printf ',\n  "window_geometry": {\n    "width": %s,\n    "height": %s\n  }' "$width" "$height")"
+	fi
+
+	printf "{\n  \"config_version\": %s%s\n}\n" "$target_version" "$geometry_json" >"$STATE_FILE"
+
+	rm -f "$LEGACY_VERSION_FILE" "$LEGACY_GEOMETRY_FILE"
+}
 
 detect_login_shell() {
 	if [[ -n "${SHELL:-}" && -x "${SHELL:-}" ]]; then
@@ -54,9 +109,31 @@ else
 	RESOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
-user_version=0
-if [[ -f "$VERSION_FILE" ]]; then
-	user_version=$(cat "$VERSION_FILE")
+user_version="$(read_config_version)"
+
+if [[ $user_version -eq 0 && ! -f "$STATE_FILE" ]]; then
+	if [[ -f "$LEGACY_VERSION_FILE" || -f "$LEGACY_GEOMETRY_FILE" ]]; then
+		legacy_version=0
+		if [[ -f "$LEGACY_VERSION_FILE" ]]; then
+			candidate="$(tr -d '[:space:]' < "$LEGACY_VERSION_FILE" || true)"
+			if [[ "$candidate" =~ ^[0-9]+$ ]]; then
+				legacy_version="$candidate"
+			fi
+		fi
+
+		if [[ $legacy_version -eq 0 ]]; then
+			legacy_version="$CURRENT_CONFIG_VERSION"
+		fi
+
+		persist_config_version "$legacy_version"
+		user_version="$legacy_version"
+	fi
+fi
+
+# Corrupted state file fallback: repair and continue with safe defaults.
+if [[ -f "$STATE_FILE" && $user_version -eq 0 ]]; then
+	persist_config_version
+	user_version="$CURRENT_CONFIG_VERSION"
 fi
 
 # Skip if already up to date or new user
@@ -112,8 +189,7 @@ read -p "Apply update? [Y/n] " -n 1 -r
 echo
 
 if [[ $REPLY =~ ^[Nn]$ ]]; then
-	mkdir -p "$(dirname "$VERSION_FILE")"
-	echo "$CURRENT_CONFIG_VERSION" >"$VERSION_FILE"
+	persist_config_version
 	echo -e "${YELLOW}Skipped${NC}"
 	echo ""
 	echo "Press any key to continue..."
@@ -136,8 +212,7 @@ if ! command -v delta &>/dev/null; then
 	fi
 fi
 
-mkdir -p "$(dirname "$VERSION_FILE")"
-echo "$CURRENT_CONFIG_VERSION" >"$VERSION_FILE"
+persist_config_version
 
 echo ""
 echo -e "\033[1;32m🎃 Kaku environment is ready! Enjoy coding.\033[0m"

@@ -42,6 +42,7 @@ use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
     HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle,
 };
+use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_void, CStr};
@@ -447,10 +448,18 @@ thread_local! {
     static PENDING_DRAG_MOVE: Cell<bool> = Cell::new(false);
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct PersistedWindowSize {
     width: usize,
     height: usize,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PersistedState {
+    #[serde(default)]
+    config_version: Option<u64>,
+    #[serde(default)]
+    window_geometry: Option<PersistedWindowSize>,
 }
 
 fn config_dir_file(name: &str) -> PathBuf {
@@ -461,7 +470,11 @@ fn config_dir_file(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn persisted_window_size_file() -> PathBuf {
+fn state_file() -> PathBuf {
+    config_dir_file("state.json")
+}
+
+fn legacy_window_geometry_file() -> PathBuf {
     config_dir_file(".kaku_window_geometry")
 }
 
@@ -513,15 +526,13 @@ fn window_size(window: *mut Object) -> PersistedWindowSize {
     }
 }
 
-fn parse_persisted_window_size(s: &str) -> Option<PersistedWindowSize> {
+fn parse_legacy_window_size(s: &str) -> Option<PersistedWindowSize> {
     let parts: Vec<_> = s.trim().split(',').map(str::trim).collect();
     match parts.as_slice() {
-        // New format: width,height
         [width, height] => Some(PersistedWindowSize {
             width: width.parse::<usize>().ok()?,
             height: height.parse::<usize>().ok()?,
         }),
-        // Backward compatibility: x,y,width,height (ignore x,y)
         [_, _, width, height] => Some(PersistedWindowSize {
             width: width.parse::<usize>().ok()?,
             height: height.parse::<usize>().ok()?,
@@ -530,10 +541,43 @@ fn parse_persisted_window_size(s: &str) -> Option<PersistedWindowSize> {
     }
 }
 
-fn load_persisted_window_size() -> Option<PersistedWindowSize> {
-    let file_name = persisted_window_size_file();
+fn migrate_legacy_window_state() -> Option<PersistedState> {
+    let file_name = legacy_window_geometry_file();
     let contents = std::fs::read_to_string(&file_name).ok()?;
-    parse_persisted_window_size(&contents)
+    let size = parse_legacy_window_size(&contents)?;
+
+    let state = PersistedState {
+        config_version: None,
+        window_geometry: Some(size),
+    };
+
+    let state_file_name = state_file();
+    if let Some(parent) = state_file_name.parent() {
+        let _ = config::create_user_owned_dirs(parent);
+    }
+
+    if let Ok(encoded) = serde_json::to_string_pretty(&state) {
+        let _ = std::fs::write(&state_file_name, format!("{}\n", encoded));
+    }
+
+    let _ = std::fs::remove_file(&file_name);
+
+    Some(state)
+}
+
+fn load_persisted_state() -> Option<PersistedState> {
+    let file_name = state_file();
+    if let Ok(contents) = std::fs::read_to_string(file_name) {
+        if let Ok(state) = serde_json::from_str(&contents) {
+            return Some(state);
+        }
+    }
+
+    migrate_legacy_window_state()
+}
+
+fn load_persisted_window_size() -> Option<PersistedWindowSize> {
+    load_persisted_state()?.window_geometry
 }
 
 fn persist_window_size(window: *mut Object) -> bool {
@@ -558,7 +602,7 @@ fn persist_window_size(window: *mut Object) -> bool {
         return false;
     }
 
-    let file_name = persisted_window_size_file();
+    let file_name = state_file();
     let size = window_size(window);
     if let Some(parent) = file_name.parent() {
         if config::create_user_owned_dirs(parent).is_err() {
@@ -566,7 +610,15 @@ fn persist_window_size(window: *mut Object) -> bool {
         }
     }
 
-    std::fs::write(&file_name, format!("{},{}\n", size.width, size.height)).is_ok()
+    let mut state = load_persisted_state().unwrap_or_default();
+    state.window_geometry = Some(size);
+
+    let encoded = match serde_json::to_string_pretty(&state) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+
+    std::fs::write(&file_name, format!("{}\n", encoded)).is_ok()
 }
 
 /// Called from the app delegate when the user confirms quit.

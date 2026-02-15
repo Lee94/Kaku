@@ -94,13 +94,28 @@ mod imp {
         cleanup_git_delta_defaults(&mut report)?;
         cleanup_theme_block(&mut report)?;
         remove_file_if_exists(
+            config_home().join("state.json"),
+            "removed persisted Kaku state",
+            &mut report,
+        )?;
+        remove_file_if_exists(
+            config_home().join(".first_run_completed"),
+            "removed legacy first-run marker",
+            &mut report,
+        )?;
+        remove_file_if_exists(
             config_home().join(".kaku_config_version"),
-            "removed config version marker",
+            "removed legacy config version marker",
             &mut report,
         )?;
         remove_file_if_exists(
             config_home().join(".kaku_window_geometry"),
-            "removed persisted window geometry",
+            "removed legacy window geometry marker",
+            &mut report,
+        )?;
+        remove_file_if_exists(
+            config_home().join(".kaku_window_position"),
+            "removed legacy window position marker",
             &mut report,
         )?;
         remove_dir_if_exists(

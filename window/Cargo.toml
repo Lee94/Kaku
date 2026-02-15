@@ -39,6 +39,7 @@ promise.workspace = true
 raw-window-handle.workspace = true
 resize.workspace = true
 serde = {workspace=true, features = ["rc", "derive"]}
+serde_json.workspace = true
 tiny-skia.workspace = true
 glium.workspace = true
 url.workspace = true

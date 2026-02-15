@@ -1,20 +1,33 @@
 #!/bin/bash
 # Reset Kaku First Run Experience
-# This script is for testing purposes. It removes the completion flag
+# This script is for testing purposes. It removes persisted Kaku state
 # so that Kaku will trigger the first run setup again.
 
 set -e
 
 CONFIG_DIR="$HOME/.config/kaku"
-FLAG_FILE="$CONFIG_DIR/.kaku_config_version"
+STATE_FILE="$CONFIG_DIR/state.json"
+LEGACY_FILES=(
+	"$CONFIG_DIR/.first_run_completed"
+	"$CONFIG_DIR/.kaku_config_version"
+	"$CONFIG_DIR/.kaku_window_geometry"
+	"$CONFIG_DIR/.kaku_window_position"
+)
 
 echo "Resetting Kaku First Run..."
 
-if [[ -f "$FLAG_FILE" ]]; then
-	rm "$FLAG_FILE"
-	echo "✅ Removed version file: $FLAG_FILE"
+if [[ -f "$STATE_FILE" ]]; then
+	rm "$STATE_FILE"
+	echo "✅ Removed state file: $STATE_FILE"
 else
-	echo "ℹ️  Version file not found: $FLAG_FILE"
+	echo "ℹ️  State file not found: $STATE_FILE"
 fi
+
+for file in "${LEGACY_FILES[@]}"; do
+	if [[ -f "$file" ]]; then
+		rm "$file"
+		echo "✅ Removed legacy file: $file"
+	fi
+done
 
 echo "Now relaunch Kaku to see the First Run experience."
