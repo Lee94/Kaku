@@ -287,6 +287,12 @@ if [[ -f "\$KAKU_ZSH_DIR/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting
     # Hook into precmd (runs before prompt is displayed)
     precmd_functions+=(zsh_syntax_highlighting_defer)
 fi
+
+# Auto-set TERM to xterm-256color for SSH connections when running under kaku,
+# since remote hosts typically lack the kaku terminfo entry
+if [[ "\$TERM" == "kaku" ]]; then
+    ssh() { TERM=xterm-256color command ssh "\$@"; }
+fi
 EOF
 
 echo -e "  ${GREEN}✓${NC} ${BOLD}Script${NC}      Generated kaku.zsh init script"
