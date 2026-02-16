@@ -89,6 +89,9 @@ impl crate::TermWindow {
             .into(),
         };
 
+        // Calculate horizontal padding for tabs: add extra 4px for better visual spacing
+        let tab_padding_h = Dimension::Pixels((0.5 * metrics.cell_size.width as f32) + 4.0);
+
         let item_to_elem = |item: &TabEntry| -> Element {
             let element = Element::with_line(&font, &item.title, palette);
 
@@ -175,8 +178,8 @@ impl crate::TermWindow {
                         bottom: Dimension::Cells(0.),
                     })
                     .padding(BoxDimension {
-                        left: Dimension::Cells(0.5),
-                        right: Dimension::Cells(0.5),
+                        left: tab_padding_h,
+                        right: tab_padding_h,
                         top: Dimension::Cells(0.2),
                         bottom: Dimension::Cells(0.25),
                     })
@@ -220,8 +223,8 @@ impl crate::TermWindow {
                         bottom: Dimension::Cells(0.),
                     })
                     .padding(BoxDimension {
-                        left: Dimension::Cells(0.5),
-                        right: Dimension::Cells(0.5),
+                        left: tab_padding_h,
+                        right: tab_padding_h,
                         top: Dimension::Cells(0.2),
                         bottom: Dimension::Cells(0.25),
                     })

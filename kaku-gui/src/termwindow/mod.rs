@@ -1863,6 +1863,20 @@ impl TermWindow {
 }
 
 impl TermWindow {
+    /// Decide whether the tab bar should be visible based on tab count,
+    /// fullscreen state, and config.
+    fn should_show_tab_bar(&self, num_tabs: usize) -> bool {
+        let is_full_screen = self.window_state.contains(WindowState::FULL_SCREEN);
+        if is_full_screen {
+            // Always show tab bar in fullscreen mode to display the right status (time)
+            self.config.enable_tab_bar
+        } else if num_tabs == 1 {
+            self.config.enable_tab_bar && !self.config.hide_tab_bar_if_only_one_tab
+        } else {
+            self.config.enable_tab_bar
+        }
+    }
+
     fn palette(&mut self) -> &ColorPalette {
         if self.palette.is_none() {
             self.palette
@@ -1921,11 +1935,7 @@ impl TermWindow {
             Some(window) => window,
             _ => return,
         };
-        if window.len() == 1 {
-            self.show_tab_bar = config.enable_tab_bar && !config.hide_tab_bar_if_only_one_tab;
-        } else {
-            self.show_tab_bar = config.enable_tab_bar;
-        }
+        self.show_tab_bar = self.should_show_tab_bar(window.len());
         *self.cursor_blink_state.borrow_mut() = ColorEase::new(
             config.cursor_blink_rate,
             config.cursor_blink_ease_in,
@@ -2246,11 +2256,7 @@ impl TermWindow {
         if let Some(window) = self.window.as_ref() {
             window.set_title(&title);
 
-            let show_tab_bar = if num_tabs == 1 {
-                self.config.enable_tab_bar && !self.config.hide_tab_bar_if_only_one_tab
-            } else {
-                self.config.enable_tab_bar
-            };
+            let show_tab_bar = self.should_show_tab_bar(num_tabs);
 
             // If the number of tabs changed and caused the tab bar to
             // hide/show, then we'll need to resize things. We only update

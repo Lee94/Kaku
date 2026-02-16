@@ -379,7 +379,7 @@ impl crate::TermWindow {
         if let Some(pane) = self.get_active_pane_or_overlay() {
             let splits = self.get_splits();
             for split in &splits {
-                self.paint_split(&mut layers, split, &pane)
+                self.paint_split(&mut layers, split, &splits, &pane)
                     .context("paint_split")?;
             }
         }
