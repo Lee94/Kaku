@@ -187,6 +187,7 @@ if [[ $user_version -lt 9 ]]; then
 	echo "  • Tab key now shows completion list instead of accepting suggestions"
 	echo "  • Use Right Arrow key to accept autosuggestions"
 	echo "  • Auto set TERM=xterm-256color for SSH to fix remote compatibility"
+	echo "  • OpenCode theme matching Kaku's color palette"
 fi
 echo ""
 
@@ -218,6 +219,16 @@ if ! command -v delta &>/dev/null; then
 				echo "You can retry later with:"
 				echo "  bash \"$RESOURCE_DIR/install_delta.sh\""
 			fi
+		fi
+	fi
+fi
+
+if [[ ! -f "$HOME/.config/opencode/opencode.json" ]]; then
+	if [[ -f "$RESOURCE_DIR/install_opencode_theme.sh" ]]; then
+		read -p "Set up OpenCode with Kaku-matching theme? [Y/n] " -n 1 -r
+		echo
+		if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+			bash "$RESOURCE_DIR/install_opencode_theme.sh"
 		fi
 	fi
 fi
