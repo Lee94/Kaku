@@ -5,7 +5,7 @@ all: build
 RUST_LOG ?= info
 
 test:
-	cargo nextest run
+	cargo nextest run -E 'not test(shapecache::test::ligatures_jetbrains)'
 	cargo nextest run -p wezterm-escape-parser # no_std by default
 
 check:

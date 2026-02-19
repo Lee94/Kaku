@@ -6,22 +6,22 @@ labels: enhancement
 assignees: ''
 ---
 
-## Feature description
+## Problem
 
-A clear and concise description of the feature you'd like to see. We suggest using English for better global understanding.
+What problem are you trying to solve?
+
+## Proposed behavior
+
+What should Kaku do?
 
 ## Use case
 
-Describe the problem this feature would solve or the benefit it would provide. For example: "I often need to... and currently I have to..."
+Describe a real scenario where this helps.
 
-## Proposed solution
+## Optional references
 
-How do you envision this feature working? Describe the behavior, UI changes, or configuration options you have in mind.
+- mockups
+- similar behavior in other terminals
+- related issues
 
-## Alternatives considered
-
-Have you considered any alternative solutions or workarounds? Why are they not sufficient?
-
-## Additional context
-
-Add any other context, mockups, references to similar features in other terminals, or examples about the feature request here.
+You can submit first with minimal info; maintainers may ask follow-up questions.
