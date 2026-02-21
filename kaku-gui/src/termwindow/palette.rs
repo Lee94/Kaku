@@ -13,6 +13,7 @@ use std::cell::{Ref, RefCell};
 use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use termwiz::lineedit::{LineEditBuffer, Movement};
 use wezterm_term::{KeyCode, KeyModifiers, MouseEvent};
 use window::color::LinearRgba;
 use window::WindowOps;
@@ -33,6 +34,9 @@ struct MatchResults {
 // Cache state to track when we need to rebuild the UI
 struct CacheState {
     selection: String,
+    cursor: usize,
+    selection_anchor: Option<usize>,
+    cursor_visible: bool,
     selected_row: usize,
     top_row: usize,
     max_rows: usize,
@@ -50,7 +54,8 @@ struct PaletteBounds {
 pub struct CommandPalette {
     element: RefCell<Option<Vec<ComputedElement>>>,
     cache_state: RefCell<Option<CacheState>>,
-    selection: RefCell<String>,
+    search_line: RefCell<LineEditBuffer>,
+    selection_anchor: RefCell<Option<usize>>,
     matches: RefCell<Option<MatchResults>>,
     selected_row: RefCell<usize>,
     top_row: RefCell<usize>,
@@ -196,7 +201,8 @@ impl CommandPalette {
         Self {
             element: RefCell::new(None),
             cache_state: RefCell::new(None),
-            selection: RefCell::new(String::new()),
+            search_line: RefCell::new(LineEditBuffer::default()),
+            selection_anchor: RefCell::new(None),
             commands,
             matches: RefCell::new(None),
             selected_row: RefCell::new(0),
@@ -208,6 +214,9 @@ impl CommandPalette {
     fn compute(
         term_window: &mut TermWindow,
         selection: &str,
+        cursor: usize,
+        selection_range: Option<(usize, usize)>,
+        cursor_visible: bool,
         commands: &[ExpandedCommand],
         matches: &MatchResults,
         max_rows_on_screen: usize,
@@ -221,22 +230,6 @@ impl CommandPalette {
         let metrics = RenderMetrics::with_font_metrics(&font.metrics());
         let dimensions = term_window.dimensions;
         let bounds = Self::palette_bounds(term_window, &metrics);
-        let epoch = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0));
-        let blink_period_ms = 1000u128;
-        let on_phase_ms = 550u128;
-        let phase = epoch.as_millis() % blink_period_ms;
-        let cursor_visible = phase < on_phase_ms;
-        let ms_to_next_toggle = if cursor_visible {
-            on_phase_ms.saturating_sub(phase)
-        } else {
-            blink_period_ms.saturating_sub(phase)
-        };
-        term_window.update_next_frame_time(Some(
-            std::time::Instant::now()
-                + Duration::from_millis(ms_to_next_toggle.max(1).min(u128::from(u64::MAX)) as u64),
-        ));
 
         // Search input area
         let mut elements = vec![];
@@ -271,24 +264,68 @@ impl CommandPalette {
                 }),
             );
         } else {
-            search_row.push(
-                Element::new(&font, ElementContent::Text(selection.to_string())).colors(
-                    ElementColors {
+            let mut breakpoints = vec![0, selection.len(), cursor];
+            if let Some((start, end)) = selection_range {
+                breakpoints.push(start);
+                breakpoints.push(end);
+            }
+            breakpoints.sort_unstable();
+            breakpoints.dedup();
+
+            for segment in breakpoints.windows(2) {
+                let start = segment[0];
+                let end = segment[1];
+
+                if start == cursor {
+                    search_row.push(
+                        Element::new(&font, ElementContent::Text(caret.to_string())).colors(
+                            ElementColors {
+                                border: BorderColor::default(),
+                                bg: LinearRgba::TRANSPARENT.into(),
+                                text: KAKU_ACCENT.into(),
+                            },
+                        ),
+                    );
+                }
+
+                if start == end {
+                    continue;
+                }
+
+                let is_selected = selection_range
+                    .map(|(selected_start, selected_end)| {
+                        start >= selected_start && end <= selected_end
+                    })
+                    .unwrap_or(false);
+
+                search_row.push(
+                    Element::new(
+                        &font,
+                        ElementContent::Text(selection[start..end].to_string()),
+                    )
+                    .colors(ElementColors {
                         border: BorderColor::default(),
-                        bg: LinearRgba::TRANSPARENT.into(),
+                        bg: if is_selected {
+                            KAKU_SELECTION_BG.into()
+                        } else {
+                            LinearRgba::TRANSPARENT.into()
+                        },
                         text: KAKU_FG.into(),
-                    },
-                ),
-            );
-            search_row.push(
-                Element::new(&font, ElementContent::Text(caret.to_string())).colors(
-                    ElementColors {
-                        border: BorderColor::default(),
-                        bg: LinearRgba::TRANSPARENT.into(),
-                        text: KAKU_ACCENT.into(),
-                    },
-                ),
-            );
+                    }),
+                );
+            }
+
+            if cursor == selection.len() {
+                search_row.push(
+                    Element::new(&font, ElementContent::Text(caret.to_string())).colors(
+                        ElementColors {
+                            border: BorderColor::default(),
+                            bg: LinearRgba::TRANSPARENT.into(),
+                            text: KAKU_ACCENT.into(),
+                        },
+                    ),
+                );
+            }
         }
 
         elements.push(
@@ -449,6 +486,204 @@ impl CommandPalette {
     fn updated_input(&self) {
         *self.selected_row.borrow_mut() = 0;
         *self.top_row.borrow_mut() = 0;
+    }
+
+    fn selection_range(anchor: Option<usize>, cursor: usize) -> Option<(usize, usize)> {
+        anchor.and_then(|anchor| {
+            if anchor == cursor {
+                None
+            } else if anchor < cursor {
+                Some((anchor, cursor))
+            } else {
+                Some((cursor, anchor))
+            }
+        })
+    }
+
+    fn current_selection_range(&self) -> Option<(usize, usize)> {
+        let cursor = self.search_line.borrow().get_cursor();
+        let anchor = *self.selection_anchor.borrow();
+        Self::selection_range(anchor, cursor)
+    }
+
+    fn move_cursor(&self, movement: Movement, extend_selection: bool) -> bool {
+        let old_anchor = *self.selection_anchor.borrow();
+        let old_cursor = self.search_line.borrow().get_cursor();
+
+        let new_cursor = {
+            let mut line = self.search_line.borrow_mut();
+            line.exec_movement(movement);
+            line.get_cursor()
+        };
+
+        let new_anchor = if extend_selection {
+            let anchor_start = old_anchor.unwrap_or(old_cursor);
+            (anchor_start != new_cursor).then_some(anchor_start)
+        } else {
+            None
+        };
+        *self.selection_anchor.borrow_mut() = new_anchor;
+
+        old_cursor != new_cursor || old_anchor != new_anchor
+    }
+
+    fn delete_selected_text(&self) -> bool {
+        let Some((start, end)) = self.current_selection_range() else {
+            return false;
+        };
+
+        let updated = {
+            let mut s = self.search_line.borrow().get_line().to_string();
+            s.replace_range(start..end, "");
+            s
+        };
+        self.search_line.borrow_mut().set_line_and_cursor(&updated, start);
+        *self.selection_anchor.borrow_mut() = None;
+        true
+    }
+
+    fn insert_char(&self, c: char) -> bool {
+        let _ = self.delete_selected_text();
+        self.search_line.borrow_mut().insert_char(c);
+        *self.selection_anchor.borrow_mut() = None;
+        self.updated_input();
+        true
+    }
+
+    fn apply_line_edit(&self, f: impl FnOnce(&mut LineEditBuffer)) -> bool {
+        let before = {
+            let line = self.search_line.borrow();
+            (line.get_line().len(), line.get_cursor())
+        };
+        f(&mut self.search_line.borrow_mut());
+        let after = {
+            let line = self.search_line.borrow();
+            (line.get_line().len(), line.get_cursor())
+        };
+        if before != after {
+            self.updated_input();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn delete_backward(&self) -> bool {
+        if self.delete_selected_text() {
+            self.updated_input();
+            return true;
+        }
+        self.apply_line_edit(|line| {
+            line.kill_text(Movement::BackwardChar(1), Movement::BackwardChar(1));
+        })
+    }
+
+    fn delete_forward(&self) -> bool {
+        if self.delete_selected_text() {
+            self.updated_input();
+            return true;
+        }
+        self.apply_line_edit(|line| {
+            line.kill_text(Movement::ForwardChar(1), Movement::None);
+        })
+    }
+
+    fn clear_input(&self) -> bool {
+        let already_clear = {
+            let line = self.search_line.borrow();
+            line.get_line().is_empty() && line.get_cursor() == 0
+        } && self.selection_anchor.borrow().is_none();
+        if already_clear {
+            return false;
+        }
+
+        self.search_line.borrow_mut().clear();
+        *self.selection_anchor.borrow_mut() = None;
+        self.updated_input();
+        true
+    }
+
+    fn select_all(&self) -> bool {
+        let (old_cursor, old_anchor, len) = {
+            let line = self.search_line.borrow();
+            (
+                line.get_cursor(),
+                *self.selection_anchor.borrow(),
+                line.get_line().len(),
+            )
+        };
+        if len == 0 {
+            return false;
+        }
+
+        let new_cursor = {
+            let mut line = self.search_line.borrow_mut();
+            line.exec_movement(Movement::EndOfLine);
+            line.get_cursor()
+        };
+        *self.selection_anchor.borrow_mut() = Some(0);
+
+        old_cursor != new_cursor || old_anchor != Some(0)
+    }
+
+    fn handle_text_edit_key(&self, key: KeyCode, mods: KeyModifiers) -> Option<bool> {
+        let shift_alt = KeyModifiers::SHIFT | KeyModifiers::ALT;
+        let shift_super = KeyModifiers::SHIFT | KeyModifiers::SUPER;
+
+        match (key, mods) {
+            (KeyCode::Char('a' | 'A'), KeyModifiers::SUPER) => Some(self.select_all()),
+            (KeyCode::LeftArrow, KeyModifiers::NONE)
+            | (KeyCode::ApplicationLeftArrow, KeyModifiers::NONE) => {
+                Some(self.move_cursor(Movement::BackwardChar(1), false))
+            }
+            (KeyCode::RightArrow, KeyModifiers::NONE)
+            | (KeyCode::ApplicationRightArrow, KeyModifiers::NONE) => {
+                Some(self.move_cursor(Movement::ForwardChar(1), false))
+            }
+            (KeyCode::LeftArrow, KeyModifiers::SHIFT)
+            | (KeyCode::ApplicationLeftArrow, KeyModifiers::SHIFT) => {
+                Some(self.move_cursor(Movement::BackwardChar(1), true))
+            }
+            (KeyCode::RightArrow, KeyModifiers::SHIFT)
+            | (KeyCode::ApplicationRightArrow, KeyModifiers::SHIFT) => {
+                Some(self.move_cursor(Movement::ForwardChar(1), true))
+            }
+            (KeyCode::LeftArrow, KeyModifiers::ALT)
+            | (KeyCode::ApplicationLeftArrow, KeyModifiers::ALT) => {
+                Some(self.move_cursor(Movement::BackwardWord(1), false))
+            }
+            (KeyCode::RightArrow, KeyModifiers::ALT)
+            | (KeyCode::ApplicationRightArrow, KeyModifiers::ALT) => {
+                Some(self.move_cursor(Movement::ForwardWord(1), false))
+            }
+            (KeyCode::LeftArrow, m) | (KeyCode::ApplicationLeftArrow, m) if m == shift_alt => {
+                Some(self.move_cursor(Movement::BackwardWord(1), true))
+            }
+            (KeyCode::RightArrow, m) | (KeyCode::ApplicationRightArrow, m) if m == shift_alt => {
+                Some(self.move_cursor(Movement::ForwardWord(1), true))
+            }
+            (KeyCode::LeftArrow, KeyModifiers::SUPER)
+            | (KeyCode::ApplicationLeftArrow, KeyModifiers::SUPER) => {
+                Some(self.move_cursor(Movement::StartOfLine, false))
+            }
+            (KeyCode::RightArrow, KeyModifiers::SUPER)
+            | (KeyCode::ApplicationRightArrow, KeyModifiers::SUPER) => {
+                Some(self.move_cursor(Movement::EndOfLine, false))
+            }
+            (KeyCode::LeftArrow, m) | (KeyCode::ApplicationLeftArrow, m) if m == shift_super => {
+                Some(self.move_cursor(Movement::StartOfLine, true))
+            }
+            (KeyCode::RightArrow, m) | (KeyCode::ApplicationRightArrow, m) if m == shift_super => {
+                Some(self.move_cursor(Movement::EndOfLine, true))
+            }
+            (KeyCode::Backspace, KeyModifiers::NONE) => Some(self.delete_backward()),
+            (KeyCode::Delete, KeyModifiers::NONE) => Some(self.delete_forward()),
+            (KeyCode::Char('u' | 'U'), KeyModifiers::CTRL) => Some(self.clear_input()),
+            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
+                Some(self.insert_char(c))
+            }
+            _ => None,
+        }
     }
 
     fn move_up(&self) -> bool {
@@ -636,6 +871,26 @@ impl CommandPalette {
         }
         Some(selected)
     }
+
+    fn cursor_blink_state() -> (bool, Duration) {
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0));
+        let blink_period_ms = 1000u128;
+        let on_phase_ms = 550u128;
+        let phase = epoch.as_millis() % blink_period_ms;
+        let cursor_visible = phase < on_phase_ms;
+        let ms_to_next_toggle = if cursor_visible {
+            on_phase_ms.saturating_sub(phase)
+        } else {
+            blink_period_ms.saturating_sub(phase)
+        };
+
+        (
+            cursor_visible,
+            Duration::from_millis(ms_to_next_toggle.max(1).min(u128::from(u64::MAX)) as u64),
+        )
+    }
 }
 
 impl Modal for CommandPalette {
@@ -733,34 +988,20 @@ impl Modal for CommandPalette {
             (KeyCode::DownArrow, KeyModifiers::SHIFT) => {
                 needs_invalidate = self.move_by(3);
             }
-            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-                // Type to add to the selection
-                let mut selection = self.selection.borrow_mut();
-                selection.push(c);
-                self.updated_input();
-                needs_invalidate = true;
-            }
-            (KeyCode::Backspace, KeyModifiers::NONE) => {
-                // Backspace to edit the selection
-                let mut selection = self.selection.borrow_mut();
-                selection.pop();
-                self.updated_input();
-                needs_invalidate = true;
-            }
-            (KeyCode::Char('u'), KeyModifiers::CTRL) => {
-                // CTRL-u to clear the selection
-                let mut selection = self.selection.borrow_mut();
-                selection.clear();
-                self.updated_input();
-                needs_invalidate = true;
-            }
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 self.activate_selected(term_window);
                 return Ok(true);
             }
-            // Swallow unhandled keys while palette is open so input never falls through
-            // to the terminal pane.
-            _ => return Ok(true),
+            _ => match self.handle_text_edit_key(key, mods) {
+                Some(changed) => {
+                    needs_invalidate = changed;
+                }
+                None => {
+                    // Swallow unhandled keys while palette is open so input never falls through
+                    // to the terminal pane.
+                    return Ok(true);
+                }
+            },
         }
         if needs_invalidate {
             if let Some(window) = term_window.window.as_ref() {
@@ -774,8 +1015,14 @@ impl Modal for CommandPalette {
         &self,
         term_window: &mut TermWindow,
     ) -> anyhow::Result<Ref<'_, [ComputedElement]>> {
-        let selection = self.selection.borrow();
-        let selection = selection.as_str();
+        let (selection, cursor) = {
+            let line = self.search_line.borrow();
+            (line.get_line().to_string(), line.get_cursor())
+        };
+        let selection_anchor = *self.selection_anchor.borrow();
+        let selection_range = Self::selection_range(selection_anchor, cursor);
+        let (cursor_visible, next_cursor_toggle) = Self::cursor_blink_state();
+        term_window.update_next_frame_time(Some(std::time::Instant::now() + next_cursor_toggle));
 
         let mut results = self.matches.borrow_mut();
 
@@ -802,12 +1049,12 @@ impl Modal for CommandPalette {
 
         let rebuild_matches = results
             .as_ref()
-            .map(|m| m.selection != selection)
+            .map(|m| m.selection != selection.as_str())
             .unwrap_or(true);
         if rebuild_matches {
             results.replace(MatchResults {
-                selection: selection.to_string(),
-                matches: compute_matches(selection, &self.commands),
+                selection: selection.clone(),
+                matches: compute_matches(selection.as_str(), &self.commands),
             });
         }
         let matches = results.as_ref().unwrap();
@@ -820,6 +1067,9 @@ impl Modal for CommandPalette {
         let needs_rebuild = self.element.borrow().is_none()
             || self.cache_state.borrow().as_ref().map_or(true, |state| {
                 state.selection != selection
+                    || state.cursor != cursor
+                    || state.selection_anchor != selection_anchor
+                    || state.cursor_visible != cursor_visible
                     || state.selected_row != selected_row
                     || state.top_row != top_row
                     || state.max_rows != max_rows_on_screen
@@ -830,7 +1080,10 @@ impl Modal for CommandPalette {
         if needs_rebuild {
             let element = Self::compute(
                 term_window,
-                selection,
+                selection.as_str(),
+                cursor,
+                selection_range,
+                cursor_visible,
                 &self.commands,
                 matches,
                 max_rows_on_screen,
@@ -839,7 +1092,10 @@ impl Modal for CommandPalette {
             )?;
             self.element.borrow_mut().replace(element);
             self.cache_state.borrow_mut().replace(CacheState {
-                selection: selection.to_string(),
+                selection: selection.clone(),
+                cursor,
+                selection_anchor,
+                cursor_visible,
                 selected_row,
                 top_row,
                 max_rows: max_rows_on_screen,
