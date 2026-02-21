@@ -4,13 +4,60 @@ pub use cocoa::appkit::NSEventModifierFlags;
 use cocoa::appkit::{NSApp, NSApplication, NSMenu, NSMenuItem};
 pub use cocoa::base::SEL;
 use cocoa::base::{id, nil};
-use cocoa::foundation::NSInteger;
+use cocoa::foundation::{NSInteger, NSPoint, NSSize};
 use config::keyassignment::KeyAssignment;
 use objc::declare::ClassDecl;
 use objc::rc::StrongPtr;
 use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
 pub use objc::*;
 use std::ffi::c_void;
+
+/// Create an NSImage from a Unicode character (for menu icons)
+pub fn image_from_unicode_char(ch: char, size: f64) -> Option<id> {
+    unsafe {
+        let nsimage: id = msg_send![class!(NSImage), alloc];
+        let image_size = NSSize::new(size, size);
+        let image: id = msg_send![nsimage, initWithSize: image_size];
+
+        if image.is_null() {
+            return None;
+        }
+
+        let image = StrongPtr::new(image);
+
+        // Lock focus to draw into the image
+        let () = msg_send![*image, lockFocus];
+
+        // Create attributes for the string
+        let font: id = msg_send![class!(NSFont), systemFontOfSize: size * 0.7];
+        let attrs_raw: id = msg_send![class!(NSMutableDictionary), alloc];
+        let attrs = StrongPtr::new(msg_send![attrs_raw, init]);
+
+        // NSFontAttributeName is the string constant "NSFont"
+        let ns_font_key = nsstring("NSFont");
+        let () = msg_send![*attrs, setObject:font forKey:*ns_font_key];
+
+        // Create attributed string
+        let s = ch.to_string();
+        let ns_str = nsstring(&s);
+        let attr_str_raw: id = msg_send![class!(NSAttributedString), alloc];
+        let attr_str =
+            StrongPtr::new(msg_send![attr_str_raw, initWithString:*ns_str attributes:*attrs]);
+
+        // Draw centered
+        let str_size: NSSize = msg_send![*attr_str, size];
+        let point = NSPoint::new(
+            (size - str_size.width) / 2.0,
+            (size - str_size.height) / 2.0 - 1.0,
+        );
+        let () = msg_send![*attr_str, drawAtPoint:point];
+
+        // Unlock focus
+        let () = msg_send![*image, unlockFocus];
+
+        Some(image.autorelease())
+    }
+}
 
 pub struct Menu {
     menu: StrongPtr,
@@ -306,6 +353,14 @@ impl MenuItem {
         }
     }
 
+    pub fn set_state(&self, on: bool) {
+        // NSControlStateValueOn = 1, NSControlStateValueOff = 0
+        let state: NSInteger = if on { 1 } else { 0 };
+        unsafe {
+            let () = msg_send![*self.item, setState: state];
+        }
+    }
+
     pub fn get_title(&self) -> String {
         unsafe {
             let title: id = msg_send![*self.item, title];
@@ -360,6 +415,13 @@ impl MenuItem {
     pub fn set_key_equiv_modifier_mask(&self, mods: NSEventModifierFlags) {
         unsafe {
             let () = msg_send![*self.item, setKeyEquivalentModifierMask: mods];
+        }
+    }
+
+    /// Set the image/icon for this menu item
+    pub fn set_image(&self, image: id) {
+        unsafe {
+            let () = msg_send![*self.item, setImage: image];
         }
     }
 }

@@ -93,6 +93,11 @@ pub trait ConnectionOps {
         ))
     }
 
+    /// Returns true if this app is already the system default terminal handler.
+    fn is_default_terminal(&self) -> bool {
+        false
+    }
+
     /// Replay any queued platform service events once app event handlers are ready.
     fn flush_pending_service_events(&self) {}
 

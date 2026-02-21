@@ -12,7 +12,7 @@ use mux::{Mux, MuxNotification};
 use promise::{Future, Promise};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -54,18 +54,87 @@ pub(crate) fn refresh_fast_config_snapshot() {
     FAST_CONFIG_SNAPSHOT.lock().unwrap().replace(cfg);
 }
 
+fn resolve_bundled_kaku_bin() -> anyhow::Result<PathBuf> {
+    fn add_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+        if !candidates.iter().any(|p| p == &path) {
+            candidates.push(path);
+        }
+    }
+
+    let mut candidates = Vec::new();
+
+    if let Some(path) = std::env::var_os("KAKU_BIN") {
+        add_candidate(&mut candidates, PathBuf::from(path));
+    }
+
+    let current_exe = std::env::current_exe().context("resolve executable path")?;
+    if let Some(parent) = current_exe.parent() {
+        add_candidate(&mut candidates, parent.join("kaku"));
+    }
+
+    if let Ok(resolved_exe) = std::fs::canonicalize(&current_exe) {
+        if let Some(parent) = resolved_exe.parent() {
+            add_candidate(&mut candidates, parent.join("kaku"));
+        }
+    }
+
+    add_candidate(
+        &mut candidates,
+        config::HOME_DIR
+            .join(".config")
+            .join("kaku")
+            .join("zsh")
+            .join("bin")
+            .join("kaku"),
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        add_candidate(
+            &mut candidates,
+            PathBuf::from("/Applications/Kaku.app/Contents/MacOS/kaku"),
+        );
+        add_candidate(
+            &mut candidates,
+            config::HOME_DIR
+                .join("Applications")
+                .join("Kaku.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("kaku"),
+        );
+    }
+
+    if let Some(path) = candidates.iter().find(|path| path.exists()) {
+        return Ok(path.clone());
+    }
+
+    anyhow::bail!(
+        "could not find kaku binary; checked: {}",
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+pub(crate) fn kaku_cli_program_for_spawn() -> String {
+    match resolve_bundled_kaku_bin() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(err) => {
+            // Finder-launched apps can have a minimal PATH; fall back only when
+            // we cannot resolve the bundled companion binary.
+            log::warn!("Falling back to PATH lookup for `kaku`: {err:#}");
+            "kaku".to_string()
+        }
+    }
+}
+
 pub fn open_kaku_config() {
     std::thread::spawn(move || {
         let result = (|| -> anyhow::Result<()> {
-            let current_exe = std::env::current_exe().context("resolve executable path")?;
-            let exe_dir = current_exe
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("missing executable parent directory"))?;
-
-            let kaku_bin = exe_dir.join("kaku");
-            if !kaku_bin.exists() {
-                anyhow::bail!("could not find kaku binary at {}", kaku_bin.display());
-            }
+            let kaku_bin = resolve_bundled_kaku_bin()?;
 
             let ensure_status = Command::new(&kaku_bin)
                 .arg("config")
@@ -521,18 +590,20 @@ impl GuiFrontEnd {
                     KeyAssignment::EmitEvent(event)
                         if event == "update-kaku" || event == "run-kaku-update" =>
                     {
+                        let kaku_cli = kaku_cli_program_for_spawn();
                         spawn_command(
                             &SpawnCommand {
-                                args: Some(vec!["kaku".to_string(), "update".to_string()]),
+                                args: Some(vec![kaku_cli, "update".to_string()]),
                                 ..Default::default()
                             },
                             SpawnWhere::NewWindow,
                         );
                     }
                     KeyAssignment::EmitEvent(event) if event == "run-kaku-cli" => {
+                        let kaku_cli = kaku_cli_program_for_spawn();
                         spawn_command(
                             &SpawnCommand {
-                                args: Some(vec!["kaku".to_string()]),
+                                args: Some(vec![kaku_cli]),
                                 ..Default::default()
                             },
                             SpawnWhere::NewWindow,

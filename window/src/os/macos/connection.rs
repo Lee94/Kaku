@@ -250,6 +250,10 @@ impl ConnectionOps for Connection {
         Ok(())
     }
 
+    fn is_default_terminal(&self) -> bool {
+        kaku_is_default_terminal()
+    }
+
     fn flush_pending_service_events(&self) {
         flush_pending_service_opens();
     }
@@ -291,6 +295,23 @@ extern "C" {
         in_role: u32,
         in_handler_bundle_id: CFStringRef,
     ) -> i32;
+
+    fn LSCopyDefaultRoleHandlerForContentType(
+        in_content_type: CFStringRef,
+        in_role: u32,
+    ) -> CFStringRef;
+}
+
+fn kaku_is_default_terminal() -> bool {
+    let content_type = CFString::new("public.unix-executable");
+    let handler = unsafe {
+        LSCopyDefaultRoleHandlerForContentType(content_type.as_concrete_TypeRef(), KLS_ROLES_ALL)
+    };
+    if handler.is_null() {
+        return false;
+    }
+    let handler_str = unsafe { CFString::wrap_under_create_rule(handler) };
+    handler_str.to_string() == KAKU_BUNDLE_IDENTIFIER
 }
 
 pub fn nsscreen_to_screen_info(screen: *mut Object) -> ScreenInfo {

@@ -3086,9 +3086,10 @@ impl TermWindow {
             }
             EmitEvent(name) => {
                 if name == "update-kaku" || name == "run-kaku-update" {
+                    let kaku_cli = crate::frontend::kaku_cli_program_for_spawn();
                     self.spawn_command(
                         &SpawnCommand {
-                            args: Some(vec!["kaku".to_string(), "update".to_string()]),
+                            args: Some(vec![kaku_cli, "update".to_string()]),
                             domain: SpawnTabDomain::DomainName("local".to_string()),
                             ..Default::default()
                         },
