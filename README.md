@@ -111,6 +111,10 @@ Achieved through aggressive stripping of unused features, lazy loading of color 
 
    Yes. You can set `window_background_opacity` and optionally `macos_window_background_blur` in `~/.config/kaku/kaku.lua`. Transparent mode now keeps top/right/bottom padding regions visually consistent to avoid transparent gaps.
 
+4. **How do I turn off copy on select?**
+
+   Kaku enables copy on select by default; to disable automatic clipboard copy and copy toast after selection, add `config.copy_on_select = false` to `~/.config/kaku/kaku.lua`.
+
 ## Contributors
 
 Big thanks to all contributors who helped build Kaku. Go follow them! ❤️
