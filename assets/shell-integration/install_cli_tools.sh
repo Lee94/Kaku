@@ -112,6 +112,9 @@ collect_missing_tools() {
 	if should_install_formula "lazygit" "lazygit" 0; then
 		MISSING_TOOLS+=("lazygit")
 	fi
+	if should_install_formula "yazi" "yazi" 0; then
+		MISSING_TOOLS+=("yazi")
+	fi
 }
 
 migrate_legacy_binary_if_shadowed() {

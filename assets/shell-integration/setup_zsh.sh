@@ -432,6 +432,43 @@ alias glo='git log --oneline --decorate'
 alias glg='git log --stat'
 alias glgp='git log --stat -p'
 
+# yazi wrapper that syncs the last visited directory back to the shell.
+y() {
+    emulate -L zsh
+    setopt local_options no_sh_word_split
+
+    if ! command -v yazi >/dev/null 2>&1; then
+        echo "yazi not found. Install it with: brew install yazi"
+        return 127
+    fi
+
+    local tmp_file=""
+    tmp_file="\$(mktemp -t kaku-yazi-cwd.XXXXXX 2>/dev/null)" || {
+        echo "Failed to create a temp file for yazi cwd sync"
+        return 1
+    }
+
+    local exit_code=0
+    command yazi --cwd-file="\$tmp_file" "\$@"
+    exit_code=\$?
+
+    if [[ -r "\$tmp_file" ]]; then
+        local new_dir=""
+        new_dir="\$(<"\$tmp_file")"
+        if [[ -n "\$new_dir" && "\$new_dir" != "\$PWD" && -d "\$new_dir" ]]; then
+            builtin cd -- "\$new_dir"
+        fi
+    fi
+
+    rm -f -- "\$tmp_file"
+    return \$exit_code
+}
+
+# Compatibility alias for users who prefer a dedicated wrapper name.
+yy() {
+    y "\$@"
+}
+
 # Load Plugins (Performance Optimized)
 
 # Load zsh-completions into fpath before compinit
