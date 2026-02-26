@@ -1883,7 +1883,12 @@ impl<'a> CSIParser<'a> {
             }
             (
                 'u',
-                [CsiParam::P(b'='), CsiParam::Integer(flags), CsiParam::P(b';'), CsiParam::Integer(mode)],
+                [
+                    CsiParam::P(b'='),
+                    CsiParam::Integer(flags),
+                    CsiParam::P(b';'),
+                    CsiParam::Integer(mode),
+                ],
             ) => Ok(CSI::Keyboard(Keyboard::SetKittyState {
                 flags: KittyKeyboardFlags::from_bits_truncate((*flags).try_into().map_err(|_| ())?),
                 mode: match *mode {
@@ -1907,7 +1912,12 @@ impl<'a> CSIParser<'a> {
             }
             (
                 'u',
-                [CsiParam::P(b'>'), CsiParam::Integer(flags), CsiParam::P(b';'), CsiParam::Integer(mode)],
+                [
+                    CsiParam::P(b'>'),
+                    CsiParam::Integer(flags),
+                    CsiParam::P(b';'),
+                    CsiParam::Integer(mode),
+                ],
             ) => Ok(CSI::Keyboard(Keyboard::PushKittyState {
                 flags: KittyKeyboardFlags::from_bits_truncate((*flags).try_into().map_err(|_| ())?),
                 mode: match *mode {
@@ -2033,9 +2043,12 @@ impl<'a> CSIParser<'a> {
             [CsiParam::Integer(a), CsiParam::P(b' ')] => {
                 Ok(self.advance_by(2, params, CSI::SelectCharacterPath(path(*a)?, 0)))
             }
-            [CsiParam::Integer(a), CsiParam::P(b';'), CsiParam::Integer(b), CsiParam::P(b' ')] => {
-                Ok(self.advance_by(4, params, CSI::SelectCharacterPath(path(*a)?, *b)))
-            }
+            [
+                CsiParam::Integer(a),
+                CsiParam::P(b';'),
+                CsiParam::Integer(b),
+                CsiParam::P(b' '),
+            ] => Ok(self.advance_by(4, params, CSI::SelectCharacterPath(path(*a)?, *b))),
             _ => Err(()),
         }
     }
@@ -2241,21 +2254,29 @@ impl<'a> CSIParser<'a> {
 
     fn secondary_device_attributes(&mut self, params: &'a [CsiParam]) -> Result<Device, ()> {
         match params {
-            [_, CsiParam::Integer(1), CsiParam::P(b';'), CsiParam::Integer(0)] => Ok(self
-                .advance_by(
-                    4,
-                    params,
-                    Device::DeviceAttributes(DeviceAttributes::Vt101WithNoOptions),
-                )),
+            [
+                _,
+                CsiParam::Integer(1),
+                CsiParam::P(b';'),
+                CsiParam::Integer(0),
+            ] => Ok(self.advance_by(
+                4,
+                params,
+                Device::DeviceAttributes(DeviceAttributes::Vt101WithNoOptions),
+            )),
             [_, CsiParam::Integer(6)] => {
                 Ok(self.advance_by(2, params, Device::DeviceAttributes(DeviceAttributes::Vt102)))
             }
-            [_, CsiParam::Integer(1), CsiParam::P(b';'), CsiParam::Integer(2)] => Ok(self
-                .advance_by(
-                    4,
-                    params,
-                    Device::DeviceAttributes(DeviceAttributes::Vt100WithAdvancedVideoOption),
-                )),
+            [
+                _,
+                CsiParam::Integer(1),
+                CsiParam::P(b';'),
+                CsiParam::Integer(2),
+            ] => Ok(self.advance_by(
+                4,
+                params,
+                Device::DeviceAttributes(DeviceAttributes::Vt100WithAdvancedVideoOption),
+            )),
             [_, CsiParam::Integer(62), ..] => Ok(self.advance_by(
                 params.len(),
                 params,
@@ -2292,9 +2313,14 @@ impl<'a> CSIParser<'a> {
     /// Parse extended mouse reports known as SGR 1006 mode
     fn mouse_sgr1006(&mut self, params: &'a [CsiParam]) -> Result<MouseReport, ()> {
         let (p0, p1, p2) = match params {
-            [CsiParam::P(b'<'), CsiParam::Integer(p0), CsiParam::P(b';'), CsiParam::Integer(p1), CsiParam::P(b';'), CsiParam::Integer(p2)] => {
-                (*p0, *p1, *p2)
-            }
+            [
+                CsiParam::P(b'<'),
+                CsiParam::Integer(p0),
+                CsiParam::P(b';'),
+                CsiParam::Integer(p1),
+                CsiParam::P(b';'),
+                CsiParam::Integer(p2),
+            ] => (*p0, *p1, *p2),
             _ => return Err(()),
         };
 
