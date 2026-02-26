@@ -21,8 +21,7 @@ use termwiz::hyperlink::Hyperlink;
 use termwiz::surface::Line;
 use wezterm_dynamic::ToDynamic;
 use wezterm_term::input::{MouseButton, MouseEventKind as TMEK};
-use wezterm_term::{KeyCode, KeyModifiers};
-use wezterm_term::{ClickPosition, LastMouseClick, StableRowIndex};
+use wezterm_term::{ClickPosition, KeyCode, KeyModifiers, LastMouseClick, StableRowIndex};
 
 impl super::TermWindow {
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
@@ -1157,9 +1156,8 @@ impl super::TermWindow {
             && !pane.is_alt_screen_active()
             && !pane.is_mouse_grabbed()
             && foreground_bin == Some("less");
-        let bypass_wheel_assignment_in_alt = is_wheel_event
-            && pane.is_alt_screen_active()
-            && !pane.is_mouse_grabbed();
+        let bypass_wheel_assignment_in_alt =
+            is_wheel_event && pane.is_alt_screen_active() && !pane.is_mouse_grabbed();
         if less_without_alt {
             let (key, amount) = match event.kind {
                 WMEK::VertWheel(amount) if amount > 0 => (KeyCode::UpArrow, amount as usize),
