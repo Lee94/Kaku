@@ -16,6 +16,112 @@ local function basename(path)
   return path:match('([^/]+)$')
 end
 
+local yazi_mode_hints = {}
+
+local function pane_hint_key(pane)
+  if not pane then
+    return nil
+  end
+
+  local ok, pane_id = pcall(function()
+    return pane:pane_id()
+  end)
+  if not ok or not pane_id then
+    return nil
+  end
+
+  return tostring(pane_id)
+end
+
+local function set_yazi_mode_hint(pane, active)
+  local key = pane_hint_key(pane)
+  if not key then
+    return
+  end
+
+  if active then
+    yazi_mode_hints[key] = true
+  else
+    yazi_mode_hints[key] = nil
+  end
+end
+
+local function pane_is_yazi(pane)
+  if not pane then
+    return false
+  end
+
+  local hint_key = pane_hint_key(pane)
+  if hint_key and yazi_mode_hints[hint_key] then
+    local alt_ok, is_alt_screen = pcall(function()
+      return pane:is_alt_screen_active()
+    end)
+    if alt_ok and is_alt_screen then
+      return true
+    end
+    if alt_ok and not is_alt_screen then
+      yazi_mode_hints[hint_key] = nil
+    end
+  end
+
+  local function is_yazi_cmd(value)
+    if type(value) ~= "string" or value == "" then
+      return false
+    end
+    return basename(value) == "yazi"
+  end
+
+  local function process_info_contains_yazi(info)
+    if type(info) ~= "table" then
+      return false
+    end
+
+    if is_yazi_cmd(info.name and tostring(info.name) or "") then
+      return true
+    end
+
+    if is_yazi_cmd(info.executable and tostring(info.executable) or "") then
+      return true
+    end
+
+    if type(info.argv) == "table" then
+      for _, arg in ipairs(info.argv) do
+        if is_yazi_cmd(tostring(arg)) then
+          return true
+        end
+      end
+    end
+
+    if type(info.children) == "table" then
+      for _, child in pairs(info.children) do
+        if process_info_contains_yazi(child) then
+          return true
+        end
+      end
+    end
+
+    return false
+  end
+
+  local ok, proc = pcall(function()
+    return pane:get_foreground_process_name()
+  end)
+  if ok and is_yazi_cmd(proc) then
+    set_yazi_mode_hint(pane, true)
+    return true
+  end
+
+  local info_ok, info = pcall(function()
+    return pane:get_foreground_process_info()
+  end)
+  if info_ok and process_info_contains_yazi(info) then
+    set_yazi_mode_hint(pane, true)
+    return true
+  end
+
+  return false
+end
+
 -- URL decode helper for Chinese characters in paths
 -- Converts %E9%9F%B3%E4%B9%90 -> 音乐
 local function url_decode(str)
@@ -38,9 +144,30 @@ local function padding_matches(current, expected)
 end
 
 local fullscreen_uniform_padding = {
+  left = '20px',
+  right = '20px',
+  top = '20px',
+  bottom = '0px',
+}
+
+local default_uniform_padding = {
   left = '40px',
   right = '40px',
   top = '70px',
+  bottom = '20px',
+}
+
+local yazi_uniform_padding = {
+  left = '40px',
+  right = '40px',
+  top = '70px',
+  bottom = '0px',
+}
+
+local yazi_fullscreen_padding = {
+  left = '20px',
+  right = '20px',
+  top = '10px',
   bottom = '0px',
 }
 
@@ -62,7 +189,7 @@ local function dims_hash(dims)
   return dims.pixel_width .. "x" .. dims.pixel_height
 end
 
-local function update_window_config(window, is_full_screen)
+local function update_window_config(window, is_full_screen, pane)
   local now = monotonic_now()
   local dims = window:get_dimensions()
   local current_hash = dims_hash(dims)
@@ -76,12 +203,30 @@ local function update_window_config(window, is_full_screen)
   end
   local overrides = window:get_config_overrides() or {}
   local needs_update = false
+  local pane_is_yazi_active = pane_is_yazi(pane)
 
-  if is_full_screen then
+  if pane_is_yazi_active and is_full_screen then
+    local align = overrides.window_content_alignment
+    local align_is_center = type(align) == 'table'
+      and align.vertical == 'Center' and align.horizontal == 'Left'
+    needs_update = (not padding_matches(overrides.window_padding, yazi_fullscreen_padding))
+      or overrides.hide_tab_bar_if_only_one_tab ~= false
+      or not align_is_center
+  elseif pane_is_yazi_active then
+    needs_update = (not padding_matches(overrides.window_padding, yazi_uniform_padding))
+      or overrides.hide_tab_bar_if_only_one_tab ~= nil
+      or overrides.window_content_alignment ~= nil
+  elseif is_full_screen then
+    local align = overrides.window_content_alignment
+    local align_is_center = type(align) == 'table'
+      and align.vertical == 'Center' and align.horizontal == 'Left'
     needs_update = (not padding_matches(overrides.window_padding, fullscreen_uniform_padding))
       or overrides.hide_tab_bar_if_only_one_tab ~= false
+      or not align_is_center
   else
-    needs_update = overrides.window_padding ~= nil or overrides.hide_tab_bar_if_only_one_tab ~= nil
+    needs_update = (not padding_matches(overrides.window_padding, default_uniform_padding))
+      or overrides.hide_tab_bar_if_only_one_tab ~= nil
+      or overrides.window_content_alignment ~= nil
   end
 
   -- Skip update if dimensions changed rapidly (within 1 second) and state is stable
@@ -98,20 +243,29 @@ local function update_window_config(window, is_full_screen)
     state.last_resize_time = now
   end
 
-  if is_full_screen then
-    if not padding_matches(overrides.window_padding, fullscreen_uniform_padding) or overrides.hide_tab_bar_if_only_one_tab ~= false then
-      overrides.window_padding = fullscreen_uniform_padding
-      overrides.hide_tab_bar_if_only_one_tab = false
-      window:set_config_overrides(overrides)
-    end
+  if not needs_update then
     return
   end
 
-  if overrides.window_padding ~= nil or overrides.hide_tab_bar_if_only_one_tab ~= nil then
-    overrides.window_padding = nil
+  if pane_is_yazi_active and is_full_screen then
+    overrides.window_padding = yazi_fullscreen_padding
+    overrides.hide_tab_bar_if_only_one_tab = false
+    overrides.window_content_alignment = { horizontal = 'Left', vertical = 'Center' }
+  elseif pane_is_yazi_active then
+    overrides.window_padding = yazi_uniform_padding
     overrides.hide_tab_bar_if_only_one_tab = nil
-    window:set_config_overrides(overrides)
+    overrides.window_content_alignment = nil
+  elseif is_full_screen then
+    overrides.window_padding = fullscreen_uniform_padding
+    overrides.hide_tab_bar_if_only_one_tab = false
+    overrides.window_content_alignment = { horizontal = 'Left', vertical = 'Center' }
+  else
+    overrides.window_padding = default_uniform_padding
+    overrides.hide_tab_bar_if_only_one_tab = nil
+    overrides.window_content_alignment = nil
   end
+
+  window:set_config_overrides(overrides)
 end
 
 local function extract_path_from_cwd(cwd)
@@ -1336,9 +1490,14 @@ local function launch_yazi(window, pane)
 
   local yazi_cmd = resolve_yazi_command()
   if not yazi_cmd then
+    set_yazi_mode_hint(pane, false)
     show_yazi_toast(window, pane, "kaku-toast-yazi-missing")
     return
   end
+
+  set_yazi_mode_hint(pane, true)
+  local dims = window:get_dimensions()
+  update_window_config(window, dims.is_full_screen, pane)
 
   local ok = pcall(function()
     -- Prefer the shell wrapper `y` for cwd sync, and fall back to raw yazi.
@@ -1348,6 +1507,7 @@ local function launch_yazi(window, pane)
     )
   end)
   if not ok then
+    set_yazi_mode_hint(pane, false)
     show_yazi_toast(window, pane, "kaku-toast-yazi-dispatch-failed")
     return
   end
@@ -1495,7 +1655,19 @@ end)
 
 wezterm.on('window-resized', function(window, _)
   local dims = window:get_dimensions()
-  update_window_config(window, dims.is_full_screen)
+  local active_pane = nil
+  local ok_tab, tab = pcall(function()
+    return window:active_tab()
+  end)
+  if ok_tab and tab then
+    local ok_pane, pane = pcall(function()
+      return tab:active_pane()
+    end)
+    if ok_pane then
+      active_pane = pane
+    end
+  end
+  update_window_config(window, dims.is_full_screen, active_pane)
 end)
 
 wezterm.on('kaku-launch-lazygit', function(window, pane)
@@ -1669,9 +1841,11 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
 end)
 
 wezterm.on('update-right-status', function(window, pane)
+  pane = resolve_active_pane(window, pane)
   schedule_lazygit_hint_probe(window, pane)
 
   local dims = window:get_dimensions()
+  update_window_config(window, dims.is_full_screen, pane)
   if not dims.is_full_screen then
     window:set_right_status('')
     return
@@ -1728,19 +1902,56 @@ config.font_rules = {
 }
 
 config.bold_brightens_ansi_colors = false
--- Auto-adjust font size based on screen DPI.
--- Retina (>=150 DPI): 17px, low-resolution external displays (<150 DPI): 15px.
+local function main_screen_is_builtin(screen)
+  local name = string.lower(tostring(screen.name or ''))
+  if name == 'color lcd' then
+    return true
+  end
+  if string.find(name, 'built-in', 1, true) then
+    return true
+  end
+  if string.find(name, 'built in', 1, true) then
+    return true
+  end
+  if string.find(name, '内建', 1, true) then
+    return true
+  end
+  return false
+end
+
+-- Auto-adjust font size using main-screen pixel size.
+-- Built-in 13-inch class displays use 15px.
+-- High-resolution displays use 17px.
 local function get_font_size()
   local success, screens = pcall(function()
     return wezterm.gui.screens()
   end)
   if success and screens and screens.main then
-    local dpi = screens.main.effective_dpi or 72
-    if dpi < 150 then
-      return 15.0  -- Low-resolution external display
+    local main = screens.main
+    local width = tonumber(main.width or 0) or 0
+    local height = tonumber(main.height or 0) or 0
+    local short_edge = math.min(width, height)
+    local is_builtin = main_screen_is_builtin(main)
+    if short_edge > 0 then
+      if is_builtin then
+        if short_edge <= 1700 then
+          return 15.0
+        end
+        return 17.0
+      end
+      if short_edge < 1800 then
+        return 15.0
+      end
+      return 17.0
+    end
+
+    -- Fallback when pixel dimensions are unavailable.
+    local dpi = tonumber(main.effective_dpi or 72) or 72
+    if dpi < 110 then
+      return 15.0
     end
   end
-  return 17.0  -- Retina default
+  return 17.0
 end
 
 config.font_size = get_font_size()
@@ -1776,8 +1987,9 @@ config.window_padding = {
   left = '40px',
   right = '40px',
   top = '70px',
-  bottom = '0px',
+  bottom = '20px',
 }
+config.use_resize_increments = true
 
 config.initial_cols = 110
 config.initial_rows = 22

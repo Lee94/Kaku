@@ -221,6 +221,10 @@ if [[ ! -f "$YAZI_CONFIG_FILE" ]]; then
 [mgr]
 ratio = [3, 3, 10]
 
+[preview]
+max_width = 2000
+max_height = 2400
+
 [opener]
 edit = [
   { run = "\${EDITOR:-vim} %s", desc = "edit", for = "unix", block = true },
@@ -228,6 +232,71 @@ edit = [
 EOF
 	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized yazi.toml ${NC}(~/.config/yazi/yazi.toml)${NC}"
 fi
+
+ensure_yazi_preview_size_defaults() {
+	if [[ ! -f "$YAZI_CONFIG_FILE" ]]; then
+		return
+	fi
+
+	local preview_block
+	preview_block="$(awk '
+		BEGIN { in_preview = 0 }
+		/^[[:space:]]*\[preview\][[:space:]]*$/ { in_preview = 1; next }
+		/^[[:space:]]*\[[^]]+\][[:space:]]*$/ { in_preview = 0 }
+		in_preview { print }
+	' "$YAZI_CONFIG_FILE")"
+
+	local has_preview_section=false
+	local has_max_width=false
+	local has_max_height=false
+
+	if grep -Eq '^[[:space:]]*\[preview\][[:space:]]*$' "$YAZI_CONFIG_FILE"; then
+		has_preview_section=true
+	fi
+	if grep -Eq '^[[:space:]]*max_width[[:space:]]*=' <<<"$preview_block"; then
+		has_max_width=true
+	fi
+	if grep -Eq '^[[:space:]]*max_height[[:space:]]*=' <<<"$preview_block"; then
+		has_max_height=true
+	fi
+
+	if [[ "$has_preview_section" == "false" ]]; then
+		cat <<EOF >>"$YAZI_CONFIG_FILE"
+
+[preview]
+max_width = 2000
+max_height = 2400
+EOF
+		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Added default Yazi preview size ${NC}(2000x2400)${NC}"
+		return
+	fi
+
+	if [[ "$has_max_width" == "true" ]] && [[ "$has_max_height" == "true" ]]; then
+		return
+	fi
+
+	local tmp_yazi
+	tmp_yazi="$(mktemp "${TMPDIR:-/tmp}/kaku-yazi-preview.XXXXXX")"
+
+	awk -v need_width="$has_max_width" -v need_height="$has_max_height" '
+		/^[[:space:]]*\[preview\][[:space:]]*$/ {
+			print
+			if (need_width != "true") {
+				print "max_width = 2000"
+			}
+			if (need_height != "true") {
+				print "max_height = 2400"
+			}
+			next
+		}
+		{ print }
+	' "$YAZI_CONFIG_FILE" >"$tmp_yazi"
+
+	mv "$tmp_yazi" "$YAZI_CONFIG_FILE"
+	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Completed Yazi preview size defaults ${NC}(2000x2400)${NC}"
+}
+
+ensure_yazi_preview_size_defaults
 
 ensure_yazi_edit_opener() {
 	if [[ ! -f "$YAZI_CONFIG_FILE" ]]; then
