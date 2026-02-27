@@ -3266,7 +3266,14 @@ impl TermWindow {
                     let kaku_cli = crate::frontend::kaku_cli_program_for_spawn();
                     self.spawn_command(
                         &SpawnCommand {
-                            args: Some(vec![kaku_cli, "update".to_string()]),
+                            args: Some(vec![
+                                "sh".to_string(),
+                                "-c".to_string(),
+                                format!(
+                                    "\"{}\" update; echo; read -p 'Press Enter to close...' -r",
+                                    kaku_cli
+                                ),
+                            ]),
                             domain: SpawnTabDomain::DomainName("local".to_string()),
                             ..Default::default()
                         },
