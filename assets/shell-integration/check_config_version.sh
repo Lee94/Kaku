@@ -66,15 +66,11 @@ echo ""
 echo -e "${BOLD}What's new:${NC}"
 case "$CURRENT_CONFIG_VERSION" in
 11)
-	echo "  • Cmd+A now selects the entire prompt line"
-	echo "  • Shift+Left/Right extends selection char by char"
-	echo "  • Cmd+Shift+Left/Right extends selection to line boundary"
-	echo "  • Plain/Cmd+arrow collapses selection without stale region highlight"
-	echo "  • ESC cancels active selection"
-	echo "  • Fixed: delete key no longer removes entire word after Chinese IME input"
-	echo "  • Fixed: sudo + nano no longer fails with unknown terminal type 'kaku'"
-	echo "  • AI error fixer: only suggests actions when commands fail"
-	echo "  • One-key apply for latest suggested fix command"
+	echo "  • Shell text editing: Cmd+A select all, Shift+Arrow selection, ESC to cancel"
+	echo "  • AI error fixer: auto-suggests fixes on failure, Cmd+Shift+E to apply"
+	echo "  • Type y to launch Yazi, cd+Tab falls back to zsh-z history"
+	echo "  • Plugins already loaded by your config are no longer duplicated"
+	echo "  • Fixed: delete key after Chinese IME, terminal type for sudo+nano"
 	;;
 *)
 	echo "  • Shell integration and reliability improvements"

@@ -1560,7 +1560,7 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         CloseCurrentPane { confirm: true } => CommandDef {
             brief: "Close Pane".into(),
             doc: "Close current pane".into(),
-            keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "w".into())],
+            keys: vec![],
             args: &[ArgType::ActivePane],
             menubar: &["Shell"],
             icon: None,
@@ -2495,9 +2495,6 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         ScrollToBottom,
         // ----------------- Window
         ToggleFullScreen,
-        SetWindowLevel(WindowLevel::AlwaysOnBottom),
-        SetWindowLevel(WindowLevel::Normal),
-        SetWindowLevel(WindowLevel::AlwaysOnTop),
         Hide,
         Search(Pattern::CurrentSelectionOrEmptyString),
         PaneSelect(PaneSelectArguments {
