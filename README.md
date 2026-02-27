@@ -59,6 +59,13 @@ Kaku comes with intuitive macOS-native shortcuts:
 | Smart Select | `z -l <dir>` |
 | Recent Dirs | `z -t` |
 
+### Intuitive Interactions
+
+- **Visual Bell**: A blinking dot appears on inactive tabs when background tasks complete (terminal bell).
+- **Zoom Window**: Double-click the title bar or tab bar empty space to zoom/unzoom the Kaku window.
+- **Open Folder**: Drag any folder to the Kaku Dock icon to instantly open it in a new window.
+- **Terminal History Peek**: Scroll up while inside alternate screen apps (like `less` or `vim`) to peek at your primary shell history.
+
 ## Configuration
 
 Kaku comes with a carefully curated shell stack for immediate productivity, so you can focus on AI coding without opening vscode:
