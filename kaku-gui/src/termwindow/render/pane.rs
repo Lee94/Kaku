@@ -38,13 +38,7 @@ impl crate::TermWindow {
             return self.paint_pane_box_model(pos);
         }
 
-        // Don't auto-clear user selection due to dirty lines.
-        // Programs with frequent output (status bar animations, streaming logs)
-        // produce dirty lines every frame, causing selections to be instantly
-        // cleared on mouse release. Let user actions (click elsewhere, new
-        // selection, ESC) manage selection lifetime instead, consistent with
-        // Alacritty/iTerm2/Kitty behavior.
-        // (Removed: check_for_dirty_lines_and_invalidate_selection)
+        // Keep user selection until explicit user action clears it.
         /*
         let zone = {
             let dims = pos.pane.get_dimensions();

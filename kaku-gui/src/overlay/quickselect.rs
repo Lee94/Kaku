@@ -950,9 +950,6 @@ impl QuickSelectRenderable {
                                 result.end_y,
                             ),
                         });
-                        // Ensure that selection doesn't get invalidated when
-                        // the overlay is closed
-                        selection.seqno = pane.get_current_seqno();
                     }
 
                     let text = term_window.selection_text(&pane);
