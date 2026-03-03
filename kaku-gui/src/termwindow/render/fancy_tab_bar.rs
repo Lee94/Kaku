@@ -378,14 +378,15 @@ impl crate::TermWindow {
                 || self.config.integrated_title_button_style
                     == IntegratedTitleButtonStyle::MacOsNative);
 
-        let left_padding = if window_buttons_at_left {
+        let is_fullscreen = self.window_state.contains(window::WindowState::FULL_SCREEN);
+        // In fullscreen, macOS native buttons are hidden, so no extra space needed
+        let left_padding = if is_fullscreen {
+            // Minimal padding in fullscreen - tabs start near the left edge
+            Dimension::Pixels(8.0)
+        } else if window_buttons_at_left {
             if self.config.integrated_title_button_style == IntegratedTitleButtonStyle::MacOsNative
             {
-                if !self.window_state.contains(window::WindowState::FULL_SCREEN) {
-                    Dimension::Pixels(70.0)
-                } else {
-                    Dimension::Cells(0.5)
-                }
+                Dimension::Pixels(70.0)
             } else {
                 Dimension::Pixels(0.0)
             }
@@ -422,6 +423,17 @@ impl crate::TermWindow {
             .colors(bar_colors);
 
         let border = self.get_os_border();
+        // In fullscreen, start from 0 since left_padding already handles alignment
+        let bounds_left = if is_fullscreen {
+            0.0
+        } else {
+            border.left.get() as f32
+        };
+        let bounds_width = if is_fullscreen {
+            self.dimensions.pixel_width as f32
+        } else {
+            self.dimensions.pixel_width as f32 - (border.left + border.right).get() as f32
+        };
 
         let mut computed = self.compute_element(
             &LayoutContext {
@@ -435,12 +447,7 @@ impl crate::TermWindow {
                     pixel_max: self.dimensions.pixel_width as f32,
                     pixel_cell: metrics.cell_size.width as f32,
                 },
-                bounds: euclid::rect(
-                    border.left.get() as f32,
-                    0.,
-                    self.dimensions.pixel_width as f32 - (border.left + border.right).get() as f32,
-                    tab_bar_height,
-                ),
+                bounds: euclid::rect(bounds_left, 0., bounds_width, tab_bar_height),
                 metrics: &metrics,
                 gl_state: self.render_state.as_ref().unwrap(),
                 zindex: 10,

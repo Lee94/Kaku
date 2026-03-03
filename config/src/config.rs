@@ -14,7 +14,7 @@ use crate::keyassignment::{
     KeyAssignment, KeyTable, KeyTableEntry, KeyTables, MouseEventTrigger, PaneEncoding,
     SpawnCommand,
 };
-use crate::keys::{Key, LeaderKey, Mouse};
+use crate::keys::{DeferredKeyCode, Key, KeyNoAction, LeaderKey, Mouse};
 use crate::lua::make_lua_context;
 use crate::ssh::{SshBackend, SshDomain};
 use crate::tls::{TlsDomainClient, TlsDomainServer};
@@ -33,6 +33,7 @@ use luahelper::impl_lua_conversion_dynamic;
 use mlua::FromLua;
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -474,6 +475,11 @@ pub struct Config {
 
     #[dynamic(default = "default_macos_forward_mods")]
     pub macos_forward_to_ime_modifier_mask: Modifiers,
+
+    /// Global hotkey to show or hide Kaku on macOS.
+    /// Set this to nil to disable the system-wide hotkey.
+    #[dynamic(default = "default_macos_global_hotkey")]
+    pub macos_global_hotkey: Option<KeyNoAction>,
 
     #[dynamic(default)]
     pub treat_left_ctrlalt_as_altgr: bool,
@@ -1912,11 +1918,9 @@ fn default_harfbuzz_features() -> Vec<String> {
 }
 
 fn default_term() -> String {
-    if bundled_terminfo_dir().is_some() {
-        "kaku".into()
-    } else {
-        "xterm-256color".into()
-    }
+    // WezTerm sets `wezterm` here, but `kaku` causes SSH issues since its
+    // terminfo doesn't exist on remote servers. So we default to `xterm-256color`.
+    "xterm-256color".into()
 }
 
 fn bundled_terminfo_dir() -> Option<PathBuf> {
@@ -2099,7 +2103,7 @@ fn default_tab_max_width() -> usize {
 }
 
 fn default_update_interval() -> u64 {
-    86400
+    10800
 }
 
 fn default_prefer_egl() -> bool {
@@ -2420,6 +2424,13 @@ pub(crate) fn validate_domain_name(name: &str) -> Result<(), String> {
 /// <https://github.com/wezterm/wezterm/issues/2630>
 fn default_macos_forward_mods() -> Modifiers {
     Modifiers::SHIFT
+}
+
+fn default_macos_global_hotkey() -> Option<KeyNoAction> {
+    Some(KeyNoAction {
+        key: DeferredKeyCode::try_from("K").expect("default global hotkey key to parse"),
+        mods: Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER,
+    })
 }
 
 fn default_colr_rasterizer() -> FontRasterizerSelection {

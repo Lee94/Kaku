@@ -33,8 +33,7 @@ use ::window::*;
 use anyhow::{anyhow, ensure, Context};
 use config::keyassignment::{
     Confirmation, KeyAssignment, LauncherActionArgs, PaneDirection, PaneEncoding, Pattern,
-    PromptInputLine, QuickSelectArguments, RotationDirection, SpawnCommand, SpawnTabDomain,
-    SplitSize,
+    PromptInputLine, QuickSelectArguments, RotationDirection, SpawnCommand, SplitSize,
 };
 use config::window::WindowLevel;
 use config::{
@@ -107,6 +106,13 @@ fn decode_hex_event_payload(payload: &str) -> Option<String> {
     }
 
     Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Check if a color is light based on luminance.
+/// Expects an SrgbaTuple (r, g, b, a) where r, g, b are in 0.0-1.0 range.
+pub fn is_light_color(color: &wezterm_term::color::SrgbaTuple) -> bool {
+    let luminance = 0.299 * color.0 + 0.587 * color.1 + 0.114 * color.2;
+    luminance > 0.5
 }
 
 fn ai_toast_lifetime_ms(message: &str) -> u64 {
@@ -736,12 +742,17 @@ pub struct TermWindow {
     gl: Option<Rc<glium::backend::Context>>,
     webgpu: Option<Rc<WebGpuState>>,
     config_subscription: Option<config::ConfigSubscription>,
+    skip_config_reload_generation: Option<usize>,
 
     /// Toast notification: (start_time, message, lifetime)
     toast: Option<(Instant, String, Duration)>,
 }
 
 impl TermWindow {
+    fn should_reload_config_for_user_var(name: &str, window_contains_pane: bool) -> bool {
+        window_contains_pane && name == "KAKU_CONFIG_CHANGED"
+    }
+
     fn load_os_parameters(&mut self) {
         if let Some(ref window) = self.window {
             self.os_parameters = match window.get_os_parameters(&self.config, self.window_state) {
@@ -757,24 +768,29 @@ impl TermWindow {
     fn close_requested(&mut self, _window: &Window) {
         #[cfg(target_os = "macos")]
         {
-            // Match the user's configured Cmd+W action for the native close button.
-            let assignment = self
-                .input_map
-                .lookup_key(&KeyCode::Char('w'), Modifiers::SUPER, None)
-                .map(|entry| entry.action);
+            let mux = Mux::get();
 
-            if let Some(assignment) = assignment {
-                if let Some(pane) = self.get_active_pane_or_overlay() {
-                    if let Err(err) = self.perform_key_assignment(&pane, &assignment) {
-                        log::error!(
-                            "Failed to perform Cmd+W assignment from close button: {err:#}"
-                        );
-                    }
-                } else {
-                    self.close_current_tab(true);
-                }
+            // Check if this is a TermWizTerminal window (e.g., config error dialog)
+            // These windows should be closed directly, not hidden
+            let is_termwiz_window = mux
+                .get_active_tab_for_window(self.mux_window_id)
+                .and_then(|tab| {
+                    tab.iter_panes_ignoring_zoom()
+                        .first()
+                        .map(|p| p.pane.domain_id())
+                })
+                .and_then(|domain_id| mux.get_domain(domain_id))
+                .map(|domain| domain.domain_name() == "TermWizTerminalDomain")
+                .unwrap_or(false);
+
+            if is_termwiz_window {
+                // For TermWiz windows (config error dialogs), close the window
+                mux.kill_window(self.mux_window_id);
+                _window.close();
+                front_end().forget_known_window(_window);
             } else {
-                self.close_current_tab(true);
+                // For normal terminal windows, hide the window without minimize animation
+                _window.order_out();
             }
         }
 
@@ -957,8 +973,13 @@ impl TermWindow {
             pixel_max: terminal_size.pixel_height as f32,
             pixel_cell: render_metrics.cell_size.height as f32,
         };
-        let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-        let padding_bottom = config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+        let (padding_top, padding_bottom) = resize::effective_vertical_padding(
+            &config,
+            v_context,
+            show_tab_bar,
+            config.tab_bar_at_bottom,
+            tab_bar_height,
+        );
 
         let mut dimensions = Dimensions {
             pixel_width: (terminal_size.pixel_width + padding_left + padding_right) as usize,
@@ -969,7 +990,14 @@ impl TermWindow {
             dpi,
         };
 
-        let border = Self::get_os_border_impl(&None, &config, &dimensions, &render_metrics);
+        let mut border = Self::get_os_border_impl(&None, &config, &dimensions, &render_metrics);
+
+        // Mirror get_os_border() for non-fullscreen startup windows.
+        let integrated_top_inset =
+            crate::termwindow::render::borders::integrated_buttons_top_inset(&config, false);
+        if integrated_top_inset > 0 {
+            border.top += ULength::new(integrated_top_inset);
+        }
 
         dimensions.pixel_height += (border.top + border.bottom).get() as usize;
         dimensions.pixel_width += (border.left + border.right).get() as usize;
@@ -995,6 +1023,7 @@ impl TermWindow {
             last_frame_duration: Duration::ZERO,
             fps: 0.,
             config_subscription: None,
+            skip_config_reload_generation: None,
             os_parameters: None,
             gl: None,
             webgpu: None,
@@ -2041,47 +2070,29 @@ impl TermWindow {
             }
         }
     }
-
-    fn check_for_dirty_lines_and_invalidate_selection(&mut self, pane: &Arc<dyn Pane>) {
-        let dims = pane.get_dimensions();
-        let viewport = self
-            .get_viewport(pane.pane_id())
-            .unwrap_or(dims.physical_top);
-        let visible_range = viewport..viewport + dims.viewport_rows as StableRowIndex;
-        let seqno = self.selection(pane.pane_id()).seqno;
-        let dirty = pane.get_changed_since(visible_range, seqno);
-
-        if dirty.is_empty() {
-            return;
-        }
-        if pane.downcast_ref::<CopyOverlay>().is_none()
-            && pane.downcast_ref::<QuickSelectOverlay>().is_none()
-        {
-            // If any of the changed lines intersect with the
-            // selection, then we need to clear the selection, but not
-            // when the search overlay is active; the search overlay
-            // marks lines as dirty to force invalidate them for
-            // highlighting purpose but also manipulates the selection
-            // and we want to allow it to retain the selection it made!
-
-            let clear_selection =
-                if let Some(selection_range) = self.selection(pane.pane_id()).range.as_ref() {
-                    let selection_rows = selection_range.rows();
-                    selection_rows.into_iter().any(|row| dirty.contains(row))
-                } else {
-                    false
-                };
-
-            if clear_selection {
-                self.selection(pane.pane_id()).range.take();
-                self.selection(pane.pane_id()).origin.take();
-                self.selection(pane.pane_id()).seqno = pane.get_current_seqno();
-            }
-        }
-    }
 }
 
 impl TermWindow {
+    /// Computes effective vertical padding for the current window state.
+    pub fn effective_vertical_padding(&self) -> (usize, usize) {
+        let tab_bar_height = if self.show_tab_bar {
+            self.tab_bar_pixel_height().unwrap_or(0.) as usize
+        } else {
+            0
+        };
+        resize::effective_vertical_padding(
+            &self.config,
+            DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.terminal_size.pixel_height as f32,
+                pixel_cell: self.render_metrics.cell_size.height as f32,
+            },
+            self.show_tab_bar,
+            self.config.tab_bar_at_bottom,
+            tab_bar_height,
+        )
+    }
+
     /// Decide whether the tab bar should be visible based on tab count,
     /// fullscreen state, and config.
     fn should_show_tab_bar(&self, num_tabs: usize) -> bool {
@@ -2105,6 +2116,11 @@ impl TermWindow {
     }
 
     pub fn config_was_reloaded(&mut self) {
+        if self.skip_config_reload_generation == Some(configuration().generation()) {
+            self.skip_config_reload_generation = None;
+            return;
+        }
+
         // Skip config reload during live resizing to avoid performance issues
         // when dragging the window. The reload will be processed after resize completes.
         if self.live_resizing {
@@ -2225,6 +2241,9 @@ impl TermWindow {
             self.load_os_parameters();
             self.apply_scale_change(&dimensions, self.fonts.get_font_scale());
             self.apply_dimensions(&dimensions, None, &window);
+            // Rebuild tab bar state synchronously so tab bar colors match the
+            // new palette in the same invalidate cycle as pane colors.
+            self.update_title_impl();
             window.config_did_change(&config);
             window.invalidate();
         }
@@ -2311,7 +2330,19 @@ impl TermWindow {
     }
 
     fn emit_user_var_event(&mut self, pane_id: PaneId, name: String, value: String) {
-        if !self.window_contains_pane(pane_id) {
+        let window_contains_pane = self.window_contains_pane(pane_id);
+
+        // Config TUI signals that config file was just saved; reload immediately.
+        // Only the window containing the signaling pane triggers reload to avoid
+        // duplicate reloads when multiple windows are open.
+        if Self::should_reload_config_for_user_var(&name, window_contains_pane) {
+            config::reload();
+            self.config_was_reloaded_impl();
+            self.skip_config_reload_generation = Some(self.config.generation());
+            return;
+        }
+
+        if !window_contains_pane {
             return;
         }
 
@@ -2398,6 +2429,7 @@ impl TermWindow {
             },
             &tabs,
             &panes,
+            self.window_state.contains(WindowState::FULL_SCREEN),
             self.config.resolved_palette.tab_bar.as_ref(),
             &self.config,
             &self.left_status,
@@ -3263,15 +3295,7 @@ impl TermWindow {
             }
             EmitEvent(name) => {
                 if name == "update-kaku" || name == "run-kaku-update" {
-                    let kaku_cli = crate::frontend::kaku_cli_program_for_spawn();
-                    self.spawn_command(
-                        &SpawnCommand {
-                            args: Some(vec![kaku_cli, "update".to_string()]),
-                            domain: SpawnTabDomain::DomainName("local".to_string()),
-                            ..Default::default()
-                        },
-                        SpawnWhere::NewWindow,
-                    );
+                    crate::frontend::run_kaku_update_from_menu();
                 } else if name == "run-kaku-cli" {
                     pane.writer().write_all(b"kaku\n")?;
                 } else if name == "run-kaku-ai-config" {
@@ -3279,7 +3303,7 @@ impl TermWindow {
                 } else if let Some(msg) = lookup_kaku_toast(name) {
                     self.show_toast(msg.to_string());
                 } else if name == "kaku-toast-ai-analyzing" {
-                    let message = "Kaku Assistant analyzing command error";
+                    let message = "Kaku Assistant analyzing command";
                     self.show_ai_progress_toast(message.to_string(), ai_toast_lifetime_ms(message));
                 } else if name == "kaku-toast-ai-applied" {
                     // No notification on successful apply; command output is enough.
@@ -4126,5 +4150,30 @@ impl Drop for TermWindow {
                 fe.forget_known_window(&window);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TermWindow;
+
+    #[test]
+    fn config_changed_reload_requires_pane_to_belong_to_window() {
+        assert!(!TermWindow::should_reload_config_for_user_var(
+            "KAKU_CONFIG_CHANGED",
+            false
+        ));
+        assert!(TermWindow::should_reload_config_for_user_var(
+            "KAKU_CONFIG_CHANGED",
+            true
+        ));
+    }
+
+    #[test]
+    fn unrelated_user_var_never_triggers_config_reload() {
+        assert!(!TermWindow::should_reload_config_for_user_var(
+            "SOME_OTHER_USER_VAR",
+            true
+        ));
     }
 }

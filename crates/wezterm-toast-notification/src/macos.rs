@@ -6,14 +6,19 @@ use block2::{Block, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread};
-use objc2_foundation::{ns_string, NSArray, NSDictionary, NSError, NSSet, NSString};
+use objc2_foundation::{ns_string, NSArray, NSBundle, NSDictionary, NSError, NSSet, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
     UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
     UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
     UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
-use std::sync::{LazyLock, Once};
+use std::sync::Once;
+
+fn has_valid_bundle_identifier() -> bool {
+    let bundle = NSBundle::mainBundle();
+    bundle.bundleIdentifier().is_some()
+}
 
 const NEEDS_SIGN: &str = "Note that the application must be code-signed \
                           for UNUserNotificationCenter to work";
@@ -71,7 +76,12 @@ define_class!(
 
             if let Some(url) = url {
                 if let Ok(url_str) = url.downcast::<NSString>() {
-                    wezterm_open_url::open_url(&url_str.to_string());
+                    let url_string = url_str.to_string();
+                    if url_string == "kaku://update" {
+                        spawn_kaku_update();
+                    } else {
+                        wezterm_open_url::open_url(&url_string);
+                    }
                 }
             }
 
@@ -95,13 +105,26 @@ impl Drop for NotifDelegate {
     }
 }
 
-const CENTER: LazyLock<Retained<UNUserNotificationCenter>> =
-    LazyLock::new(UNUserNotificationCenter::currentNotificationCenter);
+fn get_notification_center() -> Option<Retained<UNUserNotificationCenter>> {
+    if has_valid_bundle_identifier() {
+        Some(UNUserNotificationCenter::currentNotificationCenter())
+    } else {
+        None
+    }
+}
 
 pub fn initialize() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        CENTER.requestAuthorizationWithOptions_completionHandler(
+        let Some(center) = get_notification_center() else {
+            log::warn!(
+                "UNUserNotificationCenter unavailable: no valid bundle identifier. \
+                 Notifications are disabled when running outside an app bundle."
+            );
+            return;
+        };
+
+        center.requestAuthorizationWithOptions_completionHandler(
             UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
             &RcBlock::new(|ok: Bool, err| {
                 if ok.is_false() {
@@ -125,15 +148,15 @@ pub fn initialize() {
                 &NSArray::from_slice(&[]),
                 UNNotificationCategoryOptions::CustomDismissAction,
             );
-        CENTER.setNotificationCategories(&NSSet::from_retained_slice(&[show_url_cat]));
+        center.setNotificationCategories(&NSSet::from_retained_slice(&[show_url_cat]));
 
         let delegate = NotifDelegate::new();
         let delegate_proto = ProtocolObject::from_retained(delegate.clone());
-        CENTER.setDelegate(Some(&delegate_proto));
+        center.setDelegate(Some(&delegate_proto));
         log::debug!(
             "after setDelegate {:?}, center.delegate={:?}",
             delegate,
-            CENTER.delegate()
+            center.delegate()
         );
 
         // Intentionally "leak" the delegate.
@@ -149,8 +172,13 @@ pub fn initialize() {
 
 pub fn show_notif(toast: ToastNotification) -> Result<(), Box<dyn std::error::Error>> {
     initialize();
+
+    let Some(center) = get_notification_center() else {
+        return Err("Notifications unavailable: no valid bundle identifier".into());
+    };
+
     unsafe {
-        log::debug!("show_notif center.delegate is {:?}", CENTER.delegate());
+        log::debug!("show_notif center.delegate is {:?}", center.delegate());
 
         let notif = UNMutableNotificationContent::new();
         notif.setTitle(&NSString::from_str(&toast.title));
@@ -173,7 +201,7 @@ pub fn show_notif(toast: ToastNotification) -> Result<(), Box<dyn std::error::Er
             None,
         );
 
-        CENTER.addNotificationRequest_withCompletionHandler(
+        center.addNotificationRequest_withCompletionHandler(
             &*request,
             Some(&RcBlock::new(move |err: *mut NSError| {
                 if err.is_null() {
@@ -187,9 +215,11 @@ pub fn show_notif(toast: ToastNotification) -> Result<(), Box<dyn std::error::Er
                         std::thread::spawn(move || {
                             std::thread::sleep(timeout);
                             // Remove this notification
-                            let ident_array =
-                                NSArray::from_retained_slice(&[NSString::from_str(&identifier)]);
-                            CENTER.removeDeliveredNotificationsWithIdentifiers(&ident_array);
+                            if let Some(center) = get_notification_center() {
+                                let ident_array =
+                                    NSArray::from_retained_slice(&[NSString::from_str(&identifier)]);
+                                center.removeDeliveredNotificationsWithIdentifiers(&ident_array);
+                            }
                         });
                     }
                 } else {
@@ -200,4 +230,37 @@ pub fn show_notif(toast: ToastNotification) -> Result<(), Box<dyn std::error::Er
     }
 
     Ok(())
+}
+
+fn spawn_kaku_update() {
+    std::thread::spawn(|| {
+        // Find kaku-gui in the current app bundle or /Applications
+        let kaku_gui = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.join("kaku-gui")))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from("/Applications/Kaku.app/Contents/MacOS/kaku-gui")
+            });
+
+        log::info!("spawn_kaku_update: launching {:?}", kaku_gui);
+
+        // Find kaku CLI in the same directory as kaku-gui
+        let kaku_cli = kaku_gui
+            .parent()
+            .map(|p| p.join("kaku"))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from("/Applications/Kaku.app/Contents/MacOS/kaku")
+            });
+
+        let result = std::process::Command::new(&kaku_gui)
+            .args(["start", "--", kaku_cli.to_str().unwrap_or("kaku"), "update"])
+            .spawn();
+
+        match result {
+            Ok(_) => log::info!("spawn_kaku_update: process spawned successfully"),
+            Err(e) => log::error!("spawn_kaku_update: failed to spawn: {}", e),
+        }
+    });
 }

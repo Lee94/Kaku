@@ -5054,6 +5054,8 @@ impl GlyphCache {
         metrics: &RenderMetrics,
         width: u8,
     ) -> anyhow::Result<Sprite> {
+        const DEFAULT_CURSOR_TOP_INSET_PX: isize = 4;
+
         if let Some(sprite) = self.cursor_glyphs.get(&(shape, width)) {
             return Ok(sprite.clone());
         }
@@ -5078,7 +5080,20 @@ impl GlyphCache {
         match shape {
             None => {}
             Some(CursorShape::Default) => {
-                buffer.clear_rect(cell_rect, SrgbaPixel::rgba(0xff, 0xff, 0xff, 0xff));
+                // Keep the cursor bottom-aligned and shorten it slightly.
+                let top_inset = if metrics.cell_size.height > DEFAULT_CURSOR_TOP_INSET_PX {
+                    DEFAULT_CURSOR_TOP_INSET_PX
+                } else {
+                    0
+                };
+                let cursor_rect = Rect::new(
+                    Point::new(0, top_inset),
+                    Size::new(
+                        metrics.cell_size.width,
+                        metrics.cell_size.height - top_inset,
+                    ),
+                );
+                buffer.clear_rect(cursor_rect, SrgbaPixel::rgba(0xff, 0xff, 0xff, 0xff));
             }
             Some(CursorShape::BlinkingBlock | CursorShape::SteadyBlock) => {
                 self.draw_polys(

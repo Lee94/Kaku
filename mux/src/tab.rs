@@ -2486,7 +2486,7 @@ mod test {
         fn send_paste(&self, _text: &str) -> anyhow::Result<()> {
             unimplemented!()
         }
-        fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+        fn reader(&self) -> anyhow::Result<Option<PaneReader>> {
             Ok(None)
         }
         fn writer(&self) -> MappedMutexGuard<'_, dyn std::io::Write> {

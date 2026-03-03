@@ -262,9 +262,15 @@ exit 127
             .context("create opencode config directory")?;
         config::create_user_owned_dirs(&themes_dir).context("create opencode themes directory")?;
 
-        let theme_content = crate::ai_config::OPENCODE_THEME_JSON;
+        let theme_content = crate::ai_config::opencode_theme_json();
 
-        let theme_file = themes_dir.join("wezterm-match.json");
+        // Clean up legacy theme file
+        let legacy_theme = themes_dir.join("wezterm-match.json");
+        if legacy_theme.exists() {
+            let _ = std::fs::remove_file(&legacy_theme);
+        }
+
+        let theme_file = themes_dir.join("kaku-match.json");
         write_atomic(&theme_file, theme_content.as_bytes()).context("write opencode theme file")?;
 
         let target_config = opencode_config.unwrap_or(opencode_json);
@@ -279,13 +285,13 @@ exit 127
             if let Some(obj) = json.as_object_mut() {
                 obj.insert(
                     "theme".to_string(),
-                    serde_json::Value::String("wezterm-match".to_string()),
+                    serde_json::Value::String("kaku-match".to_string()),
                 );
             }
             serde_json::to_string_pretty(&json).unwrap_or_else(|_| existing)
         } else {
             r#"{
-  "theme": "wezterm-match"
+  "theme": "kaku-match"
 }"#
             .to_string()
         };

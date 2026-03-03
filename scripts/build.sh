@@ -6,6 +6,10 @@ if [[ "${OSTYPE:-}" != darwin* ]]; then
 	exit 1
 fi
 
+# Keep vendored native deps on the same minimum macOS target as Rust.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+export CMAKE_OSX_DEPLOYMENT_TARGET="${CMAKE_OSX_DEPLOYMENT_TARGET:-11.0}"
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -214,9 +218,27 @@ else
 	fi
 fi
 
-codesign --force --deep --options runtime \
-	--entitlements assets/macos/Kaku.entitlements \
-	--sign "$SIGNING_IDENTITY" "$APP_BUNDLE_OUT"
+SIGN_ARGS=(
+	--force
+	--deep
+	--options runtime
+	--entitlements assets/macos/Kaku.entitlements
+	--sign "$SIGNING_IDENTITY"
+)
+
+if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+	BUNDLE_ID="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_BUNDLE_OUT/Contents/Info.plist" 2>/dev/null || true)"
+	if [[ -n "$BUNDLE_ID" ]]; then
+		# Keep designated requirement stable across local ad-hoc builds so macOS TCC
+		# does not treat each rebuilt app as a brand-new identity.
+		SIGN_ARGS+=("-r=designated => identifier \"$BUNDLE_ID\"")
+		echo "Ad-hoc signing with stable designated requirement: $BUNDLE_ID"
+	else
+		echo "Warning: CFBundleIdentifier not found. Falling back to default ad-hoc requirement."
+	fi
+fi
+
+codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE_OUT"
 
 touch "$APP_BUNDLE_OUT/Contents/Resources/terminal.icns"
 touch "$APP_BUNDLE_OUT/Contents/Info.plist"
@@ -300,8 +322,8 @@ tell application "Finder"
 		try
 			set background picture of viewOptions to file ".background:${background_name}"
 		end try
-		set position of item "${app_name}.app" of container window to {190, 250}
-		set position of item "Applications" of container window to {500, 250}
+		set position of item "${app_name}.app" of container window to {190, 245}
+		set position of item "Applications" of container window to {500, 245}
 		close
 		open
 		update without registering applications

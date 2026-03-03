@@ -9,7 +9,7 @@ use crate::termwindow::{ScrollHit, UIItem, UIItemType};
 use ::window::bitmaps::TextureRect;
 use ::window::DeadKeyStatus;
 use anyhow::Context;
-use config::{DimensionContext, VisualBellTarget};
+use config::VisualBellTarget;
 use mux::pane::{PaneId, WithPaneLines};
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::PositionedPane;
@@ -38,7 +38,7 @@ impl crate::TermWindow {
             return self.paint_pane_box_model(pos);
         }
 
-        self.check_for_dirty_lines_and_invalidate_selection(&pos.pane);
+        // Keep user selection until explicit user action clears it.
         /*
         let zone = {
             let dims = pos.pane.get_dimensions();
@@ -73,7 +73,6 @@ impl crate::TermWindow {
         } else {
             (tab_bar_height, 0.0)
         };
-
         let border = self.get_os_border();
         let top_pixel_y = top_bar_height + padding_top + border.top.get() as f32;
 
@@ -107,6 +106,8 @@ impl crate::TermWindow {
 
         let cell_width = self.render_metrics.cell_size.width as f32;
         let cell_height = self.render_metrics.cell_size.height as f32;
+        let (_, effective_padding_bottom) = self.effective_vertical_padding();
+        let effective_padding_bottom = effective_padding_bottom as f32;
         let gap = config.split_pane_gap as usize;
         let split_col_gutter = (1 + 2 * gap).max(1) as f32;
         let split_row_gutter = gap.max(1) as f32;
@@ -149,16 +150,8 @@ impl crate::TermWindow {
 
             // Calculate the height - respect bottom padding
             let height = if pos.top + pos.height >= self.terminal_size.rows as usize {
-                // Bottom-most pane: extend to split center but respect window padding
-                let padding_bottom =
-                    self.config
-                        .window_padding
-                        .bottom
-                        .evaluate_as_pixels(DimensionContext {
-                            dpi: self.dimensions.dpi as f32,
-                            pixel_max: self.terminal_size.pixel_height as f32,
-                            pixel_cell: cell_height,
-                        });
+                // Bottom-most pane: extend to split center but respect window padding.
+                let padding_bottom = effective_padding_bottom;
                 self.dimensions.pixel_height as f32
                     - y
                     - padding_bottom
@@ -633,6 +626,8 @@ impl crate::TermWindow {
         } else {
             (tab_bar_height, 0.0)
         };
+        let (_, effective_padding_bottom) = self.effective_vertical_padding();
+        let effective_padding_bottom = effective_padding_bottom as f32;
 
         let border = self.get_os_border();
         let top_pixel_y = top_bar_height + padding_top + border.top.get() as f32;
@@ -675,16 +670,8 @@ impl crate::TermWindow {
 
         // Calculate the height - respect bottom padding
         let height = if pos.top + pos.height >= self.terminal_size.rows as usize {
-            // Bottom-most pane: extend to split center but respect window padding
-            let padding_bottom =
-                self.config
-                    .window_padding
-                    .bottom
-                    .evaluate_as_pixels(DimensionContext {
-                        dpi: self.dimensions.dpi as f32,
-                        pixel_max: self.terminal_size.pixel_height as f32,
-                        pixel_cell: cell_height,
-                    });
+            // Bottom-most pane: extend to split center but respect window padding.
+            let padding_bottom = effective_padding_bottom;
             self.dimensions.pixel_height as f32
                 - y
                 - padding_bottom

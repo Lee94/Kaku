@@ -2,12 +2,12 @@
 
 add_newline = false
 command_timeout = 10000
+format = "$directory$git_branch$git_status$package$cmd_duration$character"
 
 [directory]
 truncate_to_repo = true
 truncation_length = 2
-# Remove trailing space (default has one outside styled group).
-# The [character] module provides the sole trailing space.
+style = "bold blue"
 format = "[$path]($style)[$read_only]($read_only_style)"
 
 [character]
@@ -15,8 +15,6 @@ success_symbol = " "
 error_symbol = " "
 format = "$symbol"
 
-# Modules whose default format places trailing space OUTSIDE styled group:
-# override to remove it, preventing double-space with character.
 [git_branch]
 format = " on [$symbol$branch(:$remote_branch)]($style)"
 
@@ -28,42 +26,3 @@ format = " is [$symbol$version]($style)"
 
 [cmd_duration]
 format = " took [$duration]($style)"
-
-# Modules whose default format places trailing space INSIDE styled group
-# (e.g. bun, rust): override to also remove it, so only [character] provides
-# the trailing space.
-[rust]
-format = " via [$symbol($version)]($style)"
-
-[python]
-format = " via [$symbol$version]($style)"
-
-[line_break]
-disabled = true
-
-[nodejs]
-disabled = true
-
-[lua]
-disabled = true
-
-[aws]
-disabled = true
-
-[gcloud]
-disabled = true
-
-[azure]
-disabled = true
-
-[kubernetes]
-disabled = true
-
-[openstack]
-disabled = true
-
-[docker_context]
-disabled = true
-
-[terraform]
-disabled = true

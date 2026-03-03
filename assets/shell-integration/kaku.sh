@@ -587,4 +587,67 @@ if [[ -z "${WEZTERM_SHELL_SKIP_CWD-}" ]] ; then
   fi
 fi
 
+# Check for available Kaku updates on shell startup
+__kaku_check_update_notification() {
+  # macOS uses ~/Library/Application Support, Linux uses XDG_DATA_HOME
+  local check_file
+  if [[ "$OSTYPE" == darwin* ]]; then
+    check_file="$HOME/Library/Application Support/kaku/check_update"
+  else
+    check_file="${XDG_DATA_HOME:-$HOME/.local/share}/kaku/check_update"
+  fi
+  [[ -f "$check_file" ]] || return 0
+
+  local latest_tag current_version notified_file
+  # Extract tag_name from JSON
+  latest_tag=$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$check_file" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  [[ -z "$latest_tag" ]] && return 0
+
+  # Get current version
+  if command -v kaku >/dev/null 2>&1; then
+    current_version=$(kaku --version 2>/dev/null | head -1 | awk '{print $2}')
+  fi
+  [[ -z "$current_version" ]] && return 0
+
+  # Normalize versions for comparison
+  local latest_clean current_clean
+  latest_clean="${latest_tag#[vV]}"
+  current_clean="${current_version#[vV]}"
+
+  # Skip if same version
+  [[ "$latest_clean" == "$current_clean" ]] && return 0
+
+  # Check if already notified for this version
+  local data_dir
+  if [[ "$OSTYPE" == darwin* ]]; then
+    data_dir="$HOME/Library/Application Support/kaku"
+  else
+    data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/kaku"
+  fi
+  notified_file="$data_dir/update_notified_${latest_clean}"
+  [[ -f "$notified_file" ]] && return 0
+
+  # Numeric version comparison using sort -V
+  local newer
+  newer=$(printf '%s\n%s\n' "$current_clean" "$latest_clean" | sort -V | tail -n1)
+  if [[ "$newer" == "$latest_clean" && "$newer" != "$current_clean" ]]; then
+    local key
+    printf '\033[1;36mKaku %s is available. Press Enter to update, any other key to skip.\033[0m ' "$latest_clean"
+    # Use zsh-compatible read: -r (raw), -s (silent), -k 1 (one char) for zsh; -n 1 for bash
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+      read -rsk1 key
+    else
+      read -rsn1 key
+    fi
+    echo
+    if [[ -z "$key" ]]; then
+      kaku update
+    fi
+    # Mark as notified
+    mkdir -p "$(dirname "$notified_file")" 2>/dev/null
+    touch "$notified_file" 2>/dev/null
+  fi
+}
+__kaku_check_update_notification
+
 true

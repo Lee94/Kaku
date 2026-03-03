@@ -13,7 +13,6 @@ use promise::{Future, Promise};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use wezterm_term::{Alert, ClipboardSelection};
@@ -132,146 +131,7 @@ pub(crate) fn kaku_cli_program_for_spawn() -> String {
 }
 
 pub fn open_kaku_config() {
-    std::thread::spawn(move || {
-        let result = (|| -> anyhow::Result<()> {
-            let kaku_bin = resolve_bundled_kaku_bin()?;
-
-            let ensure_status = Command::new(&kaku_bin)
-                .arg("config")
-                .arg("--ensure-only")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .with_context(|| format!("failed to launch {}", kaku_bin.display()))?;
-            if !ensure_status.success() {
-                anyhow::bail!(
-                    "kaku config --ensure-only exited with status {}",
-                    ensure_status.code().unwrap_or(-1)
-                );
-            }
-
-            let home = std::env::var_os("HOME").context("resolve HOME for config path")?;
-            let config_path = PathBuf::from(home)
-                .join(".config")
-                .join("kaku")
-                .join("kaku.lua");
-
-            if !try_open_with_vscode(&config_path)?
-                && !try_open_with_default_app(&config_path)?
-                && !open_with_vim_in_kaku(config_path.clone())
-            {
-                reveal_in_finder(&config_path)?;
-            }
-
-            Ok(())
-        })();
-
-        if let Err(err) = result {
-            let msg = format!("Failed to open settings: {:#}", err);
-            log::error!("{}", msg);
-            promise::spawn::spawn_into_main_thread(async move {
-                if let Some(conn) = Connection::get() {
-                    conn.alert("Settings", &msg);
-                }
-            })
-            .detach();
-        }
-    });
-}
-
-fn try_open_with_vscode(config_path: &Path) -> anyhow::Result<bool> {
-    // When Kaku is launched from Finder/Dock, macOS provides a minimal PATH
-    // that won't include the `code` CLI symlink from Homebrew or /usr/local/bin.
-    // Probe well-known installation paths in addition to whatever is on PATH.
-    const CANDIDATES: &[&str] = &[
-        "code",
-        "/usr/local/bin/code",
-        "/opt/homebrew/bin/code",
-        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
-    ];
-
-    for candidate in CANDIDATES {
-        let result = Command::new(candidate)
-            .arg("-g")
-            .arg(config_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        match result {
-            Ok(status) if status.success() => return Ok(true),
-            Ok(status) => {
-                log::warn!(
-                    "Failed to open config with `{} -g` status={}; falling back",
-                    candidate,
-                    status.code().unwrap_or(-1)
-                );
-                return Ok(false);
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                log::warn!("Failed to launch `{} -g`; falling back: {err:#}", candidate);
-                return Ok(false);
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-fn try_open_with_default_app(config_path: &Path) -> anyhow::Result<bool> {
-    let status = Command::new("/usr/bin/open")
-        .arg(config_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("open kaku.lua with default app")?;
-    Ok(status.success())
-}
-
-/// Spawn the config file in vim/nvim inside a new Kaku terminal tab.
-/// Returns true if a suitable editor binary was found (spawn is async; errors are logged).
-fn open_with_vim_in_kaku(config_path: PathBuf) -> bool {
-    // Prefer nvim, then fall back to vim. Check absolute paths first so this
-    // works when Kaku is launched from Finder/Dock with a minimal PATH.
-    const CANDIDATES: &[&str] = &[
-        "/opt/homebrew/bin/nvim",
-        "/usr/local/bin/nvim",
-        "nvim",
-        "/opt/homebrew/bin/vim",
-        "/usr/local/bin/vim",
-        "/usr/bin/vim",
-        "vim",
-    ];
-
-    let editor = CANDIDATES
-        .iter()
-        .find(|&&p| {
-            if std::path::Path::new(p).is_absolute() {
-                std::path::Path::new(p).exists()
-            } else {
-                // Relative name: do a cheap probe via PATH
-                Command::new(p)
-                    .arg("--version")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            }
-        })
-        .copied();
-
-    let Some(editor) = editor else {
-        return false;
-    };
-
-    let editor = editor.to_string();
-    let path_str = config_path.to_string_lossy().into_owned();
+    let kaku_bin = kaku_cli_program_for_spawn();
 
     promise::spawn::spawn_into_main_thread(async move {
         let config = fast_config_snapshot();
@@ -280,7 +140,7 @@ fn open_with_vim_in_kaku(config_path: PathBuf) -> bool {
         let term_config = Arc::new(config::TermConfig::with_config(config));
         crate::spawn::spawn_command_impl(
             &SpawnCommand {
-                args: Some(vec![editor, path_str]),
+                args: Some(vec![kaku_bin, "config".to_string()]),
                 ..Default::default()
             },
             SpawnWhere::NewTab,
@@ -290,20 +150,55 @@ fn open_with_vim_in_kaku(config_path: PathBuf) -> bool {
         );
     })
     .detach();
-
-    true
 }
 
-fn reveal_in_finder(config_path: &Path) -> anyhow::Result<()> {
-    Command::new("/usr/bin/open")
-        .arg("-R")
-        .arg(config_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("reveal kaku.lua in Finder")?;
-    Ok(())
+pub fn run_kaku_update_from_menu() {
+    // Run through the user's shell so rc-initialized env is available.
+    // This keeps menu-triggered update behavior consistent with typing
+    // `kaku update` in a normal shell tab.
+    run_kaku_subcommand_in_shell_new_window("update");
+}
+
+fn run_kaku_subcommand_in_shell_new_window(subcommand: &str) {
+    let subcommand = subcommand.to_string();
+    let kaku_bin = kaku_cli_program_for_spawn();
+    let fallback_bin = shlex::try_quote(&kaku_bin)
+        .map(|q| q.into_owned())
+        .unwrap_or_else(|_| kaku_bin.clone());
+    let command = format!("kaku {subcommand} || {fallback_bin} {subcommand}\n");
+
+    promise::spawn::spawn(async move {
+        use config::keyassignment::SpawnTabDomain;
+        use wezterm_term::TerminalSize;
+
+        let mux = Mux::get();
+        let workspace = mux.active_workspace();
+
+        match mux
+            .spawn_tab_or_window(
+                None,
+                SpawnTabDomain::DomainName("local".to_string()),
+                None,
+                None,
+                None,
+                TerminalSize::default(),
+                None,
+                workspace,
+                None,
+            )
+            .await
+        {
+            Ok((_tab, pane, _window_id)) => {
+                if let Err(err) = write!(pane.writer(), "{command}") {
+                    log::warn!("failed to send kaku {subcommand} to pane: {err:#}");
+                }
+            }
+            Err(err) => {
+                log::error!("Failed to spawn menu command `kaku {subcommand}`: {err:#}");
+            }
+        }
+    })
+    .detach();
 }
 
 pub fn set_default_terminal_with_feedback() {
@@ -515,7 +410,7 @@ impl GuiFrontEnd {
                                         Clipboard::PrimarySelection
                                     }
                                 },
-                                clipboard.unwrap_or_default(),
+                                clipboard.map(|s| s.to_string()).unwrap_or_default(),
                             );
                         } else {
                             log::error!("Cannot assign clipboard as there are no windows");
@@ -536,6 +431,7 @@ impl GuiFrontEnd {
         // Build the initial menubar synchronously so AppKit has selectors
         // registered before users hit menu actions or key equivalents.
         crate::commands::CommandDef::recreate_menubar(&config::configuration());
+        front_end.connection.sync_global_hotkey();
 
         Ok(front_end)
     }
@@ -710,14 +606,7 @@ impl GuiFrontEnd {
                     KeyAssignment::EmitEvent(event)
                         if event == "update-kaku" || event == "run-kaku-update" =>
                     {
-                        let kaku_cli = kaku_cli_program_for_spawn();
-                        spawn_command(
-                            &SpawnCommand {
-                                args: Some(vec![kaku_cli, "update".to_string()]),
-                                ..Default::default()
-                            },
-                            SpawnWhere::NewWindow,
-                        );
+                        run_kaku_update_from_menu();
                     }
                     KeyAssignment::EmitEvent(event) if event == "run-kaku-cli" => {
                         let kaku_cli = kaku_cli_program_for_spawn();
@@ -993,6 +882,9 @@ pub fn try_new() -> Result<Rc<GuiFrontEnd>, Error> {
             // refresh asynchronously to avoid re-locking config here.
             promise::spawn::spawn_into_main_thread(async {
                 refresh_fast_config_snapshot();
+                if let Some(conn) = Connection::get() {
+                    conn.sync_global_hotkey();
+                }
             })
             .detach();
             // TODO(macos): AppKit does not allow safe async menubar reconstruction

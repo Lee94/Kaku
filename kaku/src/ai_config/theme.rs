@@ -1,21 +1,20 @@
 use ratatui::style::Color;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
-pub(super) struct Theme {
-    pub primary: Color,
-    pub secondary: Color,
-    pub accent: Color,
-    pub error: Color,
-    pub text: Color,
-    pub muted: Color,
-    pub bg: Color,
-    pub panel: Color,
+struct Theme {
+    primary: Color,
+    secondary: Color,
+    accent: Color,
+    error: Color,
+    text: Color,
+    muted: Color,
+    bg: Color,
+    panel: Color,
 }
 
-pub(super) fn parse_hex(hex: &str) -> Color {
+fn parse_hex(hex: &str) -> Color {
     let hex = hex.trim_start_matches('#');
     if hex.len() < 6 {
-        log::warn!("ai theme parse_hex: invalid color '{hex}', fallback to #000000");
         return Color::Rgb(0, 0, 0);
     }
 
@@ -31,52 +30,113 @@ pub(super) fn parse_hex(hex: &str) -> Color {
         .get(4..6)
         .and_then(|s| u8::from_str_radix(s, 16).ok())
         .unwrap_or(0);
-    if r == 0 && g == 0 && b == 0 && !hex.eq_ignore_ascii_case("000000") {
-        log::warn!("ai theme parse_hex: invalid color '{hex}', fallback to #000000");
-    }
     Color::Rgb(r, g, b)
 }
 
-pub(super) static THEME: LazyLock<Theme> = LazyLock::new(|| {
-    let json: serde_json::Value = serde_json::from_str(super::OPENCODE_THEME_JSON)
-        .map_err(|e| log::warn!("ai theme parse: invalid OPENCODE_THEME_JSON: {}", e))
-        .unwrap_or_default();
-    let defs = &json["defs"];
-    let hex =
-        |key: &str, fallback: &str| -> Color { parse_hex(defs[key].as_str().unwrap_or(fallback)) };
-    Theme {
-        primary: hex("primary", "#a277ff"),
-        secondary: hex("secondary", "#61ffca"),
-        accent: hex("accent", "#ffca85"),
-        error: hex("error", "#ff6767"),
-        text: hex("text", "#edecee"),
-        muted: hex("muted", "#6d6d6d"),
-        bg: hex("bg", "#15141b"),
-        panel: hex("element", "#1f1d28"),
+fn detect_light_theme_from_config() -> bool {
+    let config_path = config::user_config_path();
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("--") {
+            continue;
+        }
+        if trimmed.starts_with("config.color_scheme") {
+            if let Some(eq_pos) = trimmed.find('=') {
+                let value = trimmed[eq_pos + 1..]
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"');
+                return value == "Kaku Light";
+            }
+        }
     }
+    false
+}
+
+// Cache the theme detection result for the process lifetime.
+static LIGHT_THEME_CACHE: Mutex<Option<bool>> = Mutex::new(None);
+
+pub fn is_light_theme() -> bool {
+    let cached = *LIGHT_THEME_CACHE.lock().unwrap();
+    if let Some(v) = cached {
+        return v;
+    }
+    let v = detect_light_theme_from_config();
+    *LIGHT_THEME_CACHE.lock().unwrap() = Some(v);
+    v
+}
+
+/// Clear the cached theme detection result so that the next call to
+/// `is_light_theme()` re-reads the config file.
+pub fn clear_theme_cache() {
+    *LIGHT_THEME_CACHE.lock().unwrap() = None;
+}
+
+// Parse each theme exactly once; color accessors borrow these statics.
+static DARK_THEME: LazyLock<Theme> = LazyLock::new(|| Theme {
+    primary: parse_hex("#a277ff"),
+    secondary: parse_hex("#61ffca"),
+    accent: parse_hex("#ffca85"),
+    error: parse_hex("#ff6767"),
+    text: parse_hex("#edecee"),
+    muted: parse_hex("#6d6d6d"),
+    bg: parse_hex("#15141b"),
+    panel: parse_hex("#1f1d28"),
 });
 
-pub(super) fn purple() -> Color {
-    THEME.primary
+static LIGHT_THEME: LazyLock<Theme> = LazyLock::new(|| Theme {
+    primary: parse_hex("#5E3DB3"),
+    secondary: parse_hex("#24837B"),
+    accent: parse_hex("#A08200"),
+    error: parse_hex("#AF3029"),
+    text: parse_hex("#403E3C"),
+    muted: parse_hex("#6F6E69"),
+    bg: parse_hex("#FFFCF0"),
+    panel: parse_hex("#F2F0E5"),
+});
+
+fn current_theme() -> &'static Theme {
+    if is_light_theme() {
+        &LIGHT_THEME
+    } else {
+        &DARK_THEME
+    }
 }
-pub(super) fn green() -> Color {
-    THEME.secondary
+
+pub fn purple() -> Color {
+    current_theme().primary
 }
-pub(super) fn yellow() -> Color {
-    THEME.accent
+
+pub fn green() -> Color {
+    current_theme().secondary
 }
-pub(super) fn red() -> Color {
-    THEME.error
+
+pub fn yellow() -> Color {
+    current_theme().accent
 }
-pub(super) fn text_fg() -> Color {
-    THEME.text
+
+pub fn red() -> Color {
+    current_theme().error
 }
-pub(super) fn muted() -> Color {
-    THEME.muted
+
+pub fn text_fg() -> Color {
+    current_theme().text
 }
-pub(super) fn bg() -> Color {
-    THEME.bg
+
+pub fn muted() -> Color {
+    current_theme().muted
 }
-pub(super) fn panel() -> Color {
-    THEME.panel
+
+pub fn bg() -> Color {
+    current_theme().bg
+}
+
+pub fn panel() -> Color {
+    current_theme().panel
 }

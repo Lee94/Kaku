@@ -3,6 +3,20 @@ use crate::utilsprites::RenderMetrics;
 use ::window::ULength;
 use config::{ConfigHandle, DimensionContext};
 
+const INTEGRATED_BUTTONS_TOP_INSET: usize = 16;
+
+pub(crate) fn integrated_buttons_top_inset(config: &ConfigHandle, is_fullscreen: bool) -> usize {
+    if !is_fullscreen
+        && config
+            .window_decorations
+            .contains(::window::WindowDecorations::INTEGRATED_BUTTONS)
+    {
+        INTEGRATED_BUTTONS_TOP_INSET
+    } else {
+        0
+    }
+}
+
 impl crate::TermWindow {
     pub fn paint_window_borders(
         &mut self,
@@ -206,11 +220,21 @@ impl crate::TermWindow {
     }
 
     pub fn get_os_border(&self) -> window::parameters::Border {
-        Self::get_os_border_impl(
+        let mut border = Self::get_os_border_impl(
             &self.os_parameters,
             &self.config,
             &self.dimensions,
             &self.render_metrics,
-        )
+        );
+
+        let is_fullscreen = self
+            .window_state
+            .contains(::window::WindowState::FULL_SCREEN);
+        let extra_top = integrated_buttons_top_inset(&self.config, is_fullscreen);
+        if extra_top > 0 {
+            border.top += ULength::new(extra_top);
+        }
+
+        border
     }
 }

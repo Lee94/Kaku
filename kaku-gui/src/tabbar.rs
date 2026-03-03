@@ -502,6 +502,7 @@ impl TabBarState {
         mouse_x: Option<usize>,
         tab_info: &[TabInformation],
         pane_info: &[PaneInformation],
+        is_fullscreen: bool,
         colors: Option<&TabBarColors>,
         config: &ConfigHandle,
         left_status: &str,
@@ -599,6 +600,7 @@ impl TabBarState {
             && config.integrated_title_button_style == IntegratedTitleButtonStyle::MacOsNative
             && !config.use_fancy_tab_bar
             && !config.tab_bar_at_bottom
+            && !is_fullscreen
         {
             for _ in 0..10_usize {
                 line.insert_cell(0, black_cell.clone(), title_width, SEQ_ZERO);

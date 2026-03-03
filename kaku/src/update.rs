@@ -25,7 +25,7 @@ mod imp {
     use serde::Deserialize;
     use std::cmp::Ordering;
     use std::fs;
-    use std::io::{self, IsTerminal, Write};
+    use std::io::{self, IsTerminal, Read, Write};
     use std::path::{Component, Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -126,6 +126,9 @@ mod imp {
         let update_root = config::DATA_DIR.join("updates");
         config::create_user_owned_dirs(&update_root).context("create updates directory")?;
 
+        // Clean up old update directories (keep only last 2)
+        cleanup_old_updates(&update_root);
+
         let tag = release
             .as_ref()
             .map(|r| sanitize_tag(&r.tag_name))
@@ -136,6 +139,8 @@ mod imp {
 
         let zip_path = work_dir.join(UPDATE_ZIP_NAME);
         println!("Downloading {} ...", UPDATE_ZIP_NAME);
+        // Flush stdout before curl progress bar to avoid garbled output
+        let _ = io::stdout().flush();
         curl_download_to_file(zip_url, &zip_path, &current_version)
             .context("failed to download update package")?;
 
@@ -483,6 +488,29 @@ mod imp {
             .as_secs()
     }
 
+    fn cleanup_old_updates(update_root: &Path) {
+        let Ok(entries) = fs::read_dir(update_root) else {
+            return;
+        };
+
+        let mut dirs: Vec<_> = entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| {
+                let modified = e.metadata().ok()?.modified().ok()?;
+                Some((e.path(), modified))
+            })
+            .collect();
+
+        // Sort by modification time, newest first
+        dirs.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Remove all but the 2 most recent
+        for (path, _) in dirs.into_iter().skip(2) {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+
     fn curl_get_text(url: &str, current_version: &str) -> anyhow::Result<String> {
         let output = run_output(
             Command::new("/usr/bin/curl")
@@ -511,8 +539,7 @@ mod imp {
             Command::new("/usr/bin/curl")
                 .arg("--fail")
                 .arg("--location")
-                .arg("--silent")
-                .arg("--show-error")
+                .arg("--progress-bar")
                 .arg("--retry")
                 .arg("3")
                 .arg("--connect-timeout")
@@ -759,7 +786,6 @@ EOF
 }
 
 log "start apply update"
-/usr/bin/osascript -e 'display notification "Kaku is applying an update and will relaunch automatically." with title "Kaku Update"' >/dev/null 2>&1 || true
 
 # pgrep/pkill -f treats the pattern as a regex, but TARGET_GUI/TARGET_CLI may contain
 # regex metacharacters. Match against the full command line via ps and shell pattern
@@ -826,14 +852,42 @@ else
   fi
 fi
 
+# Write update completed marker with new version
+NEW_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$TARGET_APP/Contents/Info.plist" 2>/dev/null || echo "")
+if [[ -n "$NEW_VERSION" ]]; then
+  DATA_DIR="${XDG_DATA_HOME:-$HOME/Library/Application Support}/kaku"
+  /bin/mkdir -p "$DATA_DIR" 2>/dev/null
+  printf '%s\n' "$NEW_VERSION" > "$DATA_DIR/update_completed"
+  log "wrote update_completed marker: $NEW_VERSION"
+fi
+
 log "relaunch app"
-sleep 2
+sleep 1
+
+# Verify the new app exists before attempting to open
+if [[ ! -d "$TARGET_APP" ]]; then
+  log "error: TARGET_APP does not exist after copy: $TARGET_APP"
+  exit 1
+fi
+
+# Try multiple methods to relaunch the app
+log "attempting to relaunch: $TARGET_APP"
+
+# Method 1: open command with path (most reliable)
 if /usr/bin/open "$TARGET_APP" 2>>"$LOG_FILE"; then
-  log "relaunch succeeded"
+  log "relaunch via open path succeeded"
 else
-  log "relaunch via path failed, retrying by app name"
-  sleep 2
-  /usr/bin/open -a Kaku >>"$LOG_FILE" 2>&1 || log "relaunch by name also failed"
+  log "open path failed (exit code: $?), trying open -a"
+  sleep 1
+  # Method 2: open by app name
+  if /usr/bin/open -a Kaku 2>>"$LOG_FILE"; then
+    log "relaunch via open -a succeeded"
+  else
+    log "open -a failed (exit code: $?), trying osascript"
+    sleep 1
+    # Method 3: AppleScript as last resort
+    /usr/bin/osascript -e 'tell application "Kaku" to activate' 2>>"$LOG_FILE" || log "osascript also failed"
+  fi
 fi
 
 log "done"
@@ -864,21 +918,39 @@ log "done"
             "Ready to apply update {}.",
             format_version_for_display(update_label)
         );
-        print!("Kaku will quit and relaunch automatically. Continue? [Y/n] ");
+        print!("Press Enter to continue, any other key to cancel. ");
         io::stdout()
             .flush()
             .context("flush stdout for update confirmation")?;
 
-        let mut input = String::new();
-        let bytes_read = io::stdin()
-            .read_line(&mut input)
-            .context("read update confirmation")?;
-        if bytes_read == 0 {
-            return Ok(false);
-        }
-        let answer = input.trim().to_ascii_lowercase();
+        // Read single key without waiting for Enter
+        let result = read_single_key();
+        println!();
 
-        Ok(answer.is_empty() || answer == "y" || answer == "yes")
+        Ok(result.map(|c| c == '\n' || c == '\r').unwrap_or(false))
+    }
+
+    fn read_single_key() -> anyhow::Result<char> {
+        use std::os::unix::io::AsRawFd;
+
+        let stdin_fd = io::stdin().as_raw_fd();
+        let mut termios = termios::Termios::from_fd(stdin_fd)?;
+        let original = termios;
+
+        // Disable canonical mode and echo
+        termios.c_lflag &= !(termios::ICANON | termios::ECHO);
+        termios.c_cc[termios::VMIN] = 1;
+        termios.c_cc[termios::VTIME] = 0;
+        termios::tcsetattr(stdin_fd, termios::TCSANOW, &termios)?;
+
+        let mut buf = [0u8; 1];
+        let result = io::stdin().read_exact(&mut buf);
+
+        // Restore original terminal settings
+        termios::tcsetattr(stdin_fd, termios::TCSANOW, &original)?;
+
+        result?;
+        Ok(buf[0] as char)
     }
 
     fn spawn_update_helper(

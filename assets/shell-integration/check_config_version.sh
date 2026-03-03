@@ -8,7 +8,7 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-CURRENT_CONFIG_VERSION=11
+CURRENT_CONFIG_VERSION=12
 CONFIG_DIR="$HOME/.config/kaku"
 STATE_FILE="$CONFIG_DIR/state.json"
 LEGACY_VERSION_FILE="$CONFIG_DIR/.kaku_config_version"
@@ -65,16 +65,21 @@ echo ""
 # Show only current release highlights to keep this prompt short and maintainable.
 echo -e "${BOLD}What's new:${NC}"
 case "$CURRENT_CONFIG_VERSION" in
+12)
+	echo "  • Shell text editing: Cmd+A select all, Shift+Arrow selection, ESC to cancel"
+	echo "  • AI error fixer: auto-suggests fixes on failure, Cmd+Shift+E to apply"
+	echo "  • Type y to launch Yazi, cd+Tab falls back to zsh-z history"
+	echo "  • Plugins already loaded by your config are no longer duplicated"
+	echo "  • Fixed: delete key after Chinese IME, terminal type for sudo+nano"
+	echo "  • Fixed: yazi alias conflict with existing shell aliases"
+	echo "  • Fixed: SSH sessions now use xterm-256color for better remote compatibility"
+	;;
 11)
-	echo "  • Cmd+A now selects the entire prompt line"
-	echo "  • Shift+Left/Right extends selection char by char"
-	echo "  • Cmd+Shift+Left/Right extends selection to line boundary"
-	echo "  • Plain/Cmd+arrow collapses selection without stale region highlight"
-	echo "  • ESC cancels active selection"
-	echo "  • Fixed: delete key no longer removes entire word after Chinese IME input"
-	echo "  • Fixed: sudo + nano no longer fails with unknown terminal type 'kaku'"
-	echo "  • AI error fixer: only suggests actions when commands fail"
-	echo "  • One-key apply for latest suggested fix command"
+	echo "  • Shell text editing: Cmd+A select all, Shift+Arrow selection, ESC to cancel"
+	echo "  • AI error fixer: auto-suggests fixes on failure, Cmd+Shift+E to apply"
+	echo "  • Type y to launch Yazi, cd+Tab falls back to zsh-z history"
+	echo "  • Plugins already loaded by your config are no longer duplicated"
+	echo "  • Fixed: delete key after Chinese IME, terminal type for sudo+nano"
 	;;
 *)
 	echo "  • Shell integration and reliability improvements"
@@ -104,7 +109,7 @@ else
 fi
 
 if [[ -f "$TOOLS_SCRIPT" ]]; then
-	if ! bash "$TOOLS_SCRIPT"; then
+	if ! KAKU_AUTO_INSTALL_TOOLS=1 bash "$TOOLS_SCRIPT"; then
 		echo ""
 		echo -e "${YELLOW}Optional tool installation failed.${NC}"
 	fi

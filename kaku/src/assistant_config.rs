@@ -55,6 +55,21 @@ pub fn ensure_assistant_toml_exists() -> anyhow::Result<PathBuf> {
     }
 
     ensure_required_keys(&path)?;
+
+    // Best-effort cleanup for deprecated config files
+    let ai_toml = parent.join("ai.toml");
+    if ai_toml.exists() {
+        if let Err(e) = std::fs::remove_file(&ai_toml) {
+            log::debug!("Failed to remove deprecated ai.toml: {}", e);
+        }
+    }
+    let auto_toml = parent.join("auto.toml");
+    if auto_toml.exists() {
+        if let Err(e) = std::fs::remove_file(&auto_toml) {
+            log::debug!("Failed to remove deprecated auto.toml: {}", e);
+        }
+    }
+
     Ok(path)
 }
 
@@ -68,15 +83,20 @@ pub fn ensure_assistant_toml_exists() -> anyhow::Result<PathBuf> {
 pub fn default_assistant_toml_template() -> String {
     format!(
         "# Kaku Assistant configuration\n\
+#\n\
 # enabled: true enables command analysis suggestions; false disables requests.\n\
 # api_key: provider API key, example: \"sk-xxxx\".\n\
 # model: model id, example: \"DeepSeek-V3.2\" or \"gpt-5-mini\".\n\
 # base_url: chat-completions API root URL.\n\
+# custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n\
+#                 format: [\"Header-Name: value\", \"Another-Header: value\"]\n\
+#                 note: Authorization and Content-Type are reserved and cannot be overridden.\n\
 \n\
 enabled = true\n\
 # api_key = \"<your_api_key>\"\n\
 model = \"{DEFAULT_MODEL}\"\n\
-base_url = \"{DEFAULT_BASE_URL}\"\n"
+base_url = \"{DEFAULT_BASE_URL}\"\n\
+# custom_headers = [\"X-Customer-ID: your-customer-id\"]\n"
     )
 }
 
@@ -222,5 +242,11 @@ api_key = "x"
         let (updated, changed) = ensure_required_keys_in_content(&content);
         assert!(!changed);
         assert_eq!(updated, content);
+    }
+
+    #[test]
+    fn default_template_includes_custom_headers_hint() {
+        let template = default_assistant_toml_template();
+        assert!(template.contains("custom_headers"));
     }
 }

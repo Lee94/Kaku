@@ -21,6 +21,10 @@ lazy_static::lazy_static! {
     static ref GRADIENT_CACHE: Mutex<Vec<CachedGradient>> = Mutex::new(vec![]);
 }
 
+// Hard limits to prevent unbounded cache growth during extreme config switching
+const MAX_IMAGE_CACHE_ENTRIES: usize = 32;
+const MAX_GRADIENT_CACHE_ENTRIES: usize = 32;
+
 struct CachedGradient {
     g: Gradient,
     width: u32,
@@ -161,6 +165,11 @@ impl CachedGradient {
 
         let image = Self::compute(g, width, height)?;
 
+        // Enforce hard limit to prevent unbounded growth
+        if cache.len() >= MAX_GRADIENT_CACHE_ENTRIES {
+            cache.clear();
+        }
+
         cache.push(Self {
             g: g.clone(),
             width,
@@ -210,6 +219,11 @@ impl CachedImage {
         let mut data = ImageDataType::EncodedFile(data);
         data.adjust_speed(speed);
         let image = Arc::new(ImageData::with_data(data));
+
+        // Enforce hard limit to prevent unbounded growth
+        if cache.len() >= MAX_IMAGE_CACHE_ENTRIES {
+            cache.clear();
+        }
 
         cache.insert(
             path.to_string(),

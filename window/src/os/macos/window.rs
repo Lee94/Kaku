@@ -65,6 +65,11 @@ const FULLSCREEN_ENTER_HIDE_CONTENT_MS: u64 = 30;
 const FULLSCREEN_EXIT_HIDE_CONTENT_MS: u64 = 20;
 const ZOOM_HIDE_CONTENT_MS: u64 = 20;
 const MOVE_PERSIST_DELAY_SECS: f64 = 0.35;
+// Keep these accessibility strings stable. Some voice input tools match
+// TextArea semantics and descriptions heuristically to decide whether the
+// view is editable text.
+const AX_ROLE_TEXT_AREA: &[u8] = b"AXTextArea\0";
+const AX_ROLE_DESCRIPTION_TERMINAL_TEXT_AREA: &[u8] = b"terminal text area\0";
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
@@ -1145,6 +1150,13 @@ impl WindowOps for Window {
         });
     }
 
+    fn order_out(&self) {
+        Connection::with_window_inner(self.id, |inner| {
+            inner.order_out();
+            Ok(())
+        });
+    }
+
     fn show(&self) {
         // Try synchronous show first when called from the main thread;
         // fall back to the deferred spawn path otherwise.
@@ -1468,7 +1480,7 @@ impl WindowInner {
         }
     }
 
-    fn is_fullscreen(&mut self) -> bool {
+    pub(crate) fn is_fullscreen(&mut self) -> bool {
         if self.is_native_fullscreen() {
             true
         } else if let Some(window_view) = WindowView::get_this(unsafe { &**self.view }) {
@@ -1502,7 +1514,7 @@ impl WindowInner {
 
     /// If we were in native full screen mode, exit it and return true.
     /// Otherwise, return false.
-    fn exit_native_fullscreen(&mut self) -> bool {
+    pub(crate) fn exit_native_fullscreen(&mut self) -> bool {
         if self.is_native_fullscreen() {
             if let Some(window_view) = WindowView::get_this(unsafe { &**self.view }) {
                 window_view.native_fullscreen_transition_active.set(true);
@@ -1520,7 +1532,7 @@ impl WindowInner {
 
     /// If we were in simple full screen mode, exit it and return true.
     /// Otherwise, return false
-    fn exit_simple_fullscreen(&mut self) -> bool {
+    pub(crate) fn exit_simple_fullscreen(&mut self) -> bool {
         if let Some(window_view) = WindowView::get_this(unsafe { &**self.view }) {
             let is_fullscreen = window_view.inner.borrow().fullscreen.is_some();
             if is_fullscreen {
@@ -1704,6 +1716,25 @@ impl WindowInner {
 }
 
 impl WindowInner {
+    /// Update the OpenGL context after the system wakes from sleep.
+    /// This prevents crashes when AppKit tries to flush a stale OpenGL surface.
+    pub(crate) fn update_opengl_context_after_wake(&mut self) {
+        if let Some(window_view) = WindowView::get_this(unsafe { &**self.view }) {
+            if let Ok(mut inner) = window_view.inner.try_borrow_mut() {
+                if let Some(gl_context_pair) = inner.gl_context_pair.as_ref() {
+                    log::debug!(
+                        "updating OpenGL context for window after wake (window_id={})",
+                        inner.window_id
+                    );
+                    gl_context_pair.backend.update();
+                }
+                // Trigger a repaint to ensure the window content is refreshed
+                inner.invalidated = true;
+                inner.events.dispatch(WindowEvent::NeedRepaint);
+            }
+        }
+    }
+
     fn show(&mut self) {
         unsafe {
             let current_app = NSRunningApplication::currentApplication(nil);
@@ -1747,6 +1778,15 @@ impl WindowInner {
             // We could literally set it invisible like this, but
             // then there is no UI to make it visible again later.
             //let () = msg_send![*self.window, setIsVisible: NO];
+        }
+    }
+
+    /// Remove the window from screen without changing fullscreen state.
+    /// Used by the global hotkey to hide a fullscreen window; the window
+    /// retains its fullscreen style mask and will restore when focused.
+    pub(crate) fn order_out(&mut self) {
+        unsafe {
+            let () = msg_send![*self.window, orderOut: nil];
         }
     }
 
@@ -2554,6 +2594,37 @@ fn is_non_menu_virtual_key(vkey: u16) -> bool {
     is_navigation_virtual_key(vkey) || is_function_virtual_key(vkey)
 }
 
+fn is_symbol_virtual_key(vkey: u16) -> bool {
+    [
+        kVK_ANSI_Comma,
+        kVK_ANSI_Period,
+        kVK_ANSI_Slash,
+        kVK_ANSI_Semicolon,
+        kVK_ANSI_Quote,
+        kVK_ANSI_LeftBracket,
+        kVK_ANSI_RightBracket,
+        kVK_ANSI_Backslash,
+        kVK_ANSI_Grave,
+        kVK_ANSI_Minus,
+        kVK_ANSI_Equal,
+    ]
+    .contains(&vkey)
+}
+
+fn should_intercept_special_shortcut(chars: &str, modifiers: Modifiers, virtual_key: u16) -> bool {
+    let command_period = virtual_key == kVK_ANSI_Period && modifiers == Modifiers::SUPER;
+    let command_shift_symbol = modifiers == (Modifiers::SUPER | Modifiers::SHIFT)
+        && is_symbol_virtual_key(virtual_key)
+        // Preserve macOS built-in Cmd+` and Cmd+Shift+` window cycling.
+        && virtual_key != kVK_ANSI_Grave;
+
+    command_period
+        || command_shift_symbol
+        || (chars == "\u{1b}" && modifiers == Modifiers::CTRL)
+        || (chars == "\t" && modifiers == Modifiers::CTRL)
+        || (chars == "\x19"/* Shift-Tab: See issue #1902 */)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2624,6 +2695,43 @@ mod tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn special_shortcut_matching_uses_stable_symbol_vkeys() {
+        assert!(should_intercept_special_shortcut(
+            ".",
+            Modifiers::SUPER,
+            kVK_ANSI_Period,
+        ));
+        assert!(should_intercept_special_shortcut(
+            ",",
+            Modifiers::SUPER | Modifiers::SHIFT,
+            kVK_ANSI_Comma,
+        ));
+        assert!(should_intercept_special_shortcut(
+            "<",
+            Modifiers::SUPER | Modifiers::SHIFT,
+            kVK_ANSI_Comma,
+        ));
+
+        assert!(!should_intercept_special_shortcut(
+            ",",
+            Modifiers::SUPER,
+            kVK_ANSI_Comma,
+        ));
+        // Cmd+Shift+. should be intercepted (symbol key)
+        assert!(should_intercept_special_shortcut(
+            ">",
+            Modifiers::SUPER | Modifiers::SHIFT,
+            kVK_ANSI_Period,
+        ));
+        // Cmd+Shift+` should NOT be intercepted (window cycling)
+        assert!(!should_intercept_special_shortcut(
+            "~",
+            Modifiers::SUPER | Modifiers::SHIFT,
+            kVK_ANSI_Grave,
+        ));
     }
 }
 
@@ -2754,6 +2862,24 @@ impl WindowView {
 
         if let Some(myself) = Self::get_this(this) {
             let mut inner = myself.inner.borrow_mut();
+
+            if selector == "insertNewline:" {
+                // Handle newline from IME/dictation by dispatching Enter key event.
+                // Use ImeDisposition::Acted to prevent duplicate dispatch in key_down_event.
+                let event = KeyEvent {
+                    key: KeyCode::Char('\r'),
+                    modifiers: Modifiers::NONE,
+                    leds: KeyboardLedStatus::empty(),
+                    repeat_count: 1,
+                    key_is_down: true,
+                    raw: None,
+                };
+                inner.ime_last_event = Some(event.clone());
+                inner.events.dispatch(WindowEvent::KeyEvent(event));
+                inner.ime_state = ImeDisposition::Acted;
+                return;
+            }
+
             inner.ime_state = ImeDisposition::Continue;
             inner.ime_last_event.take();
         }
@@ -3101,6 +3227,26 @@ impl WindowView {
         NO
     }
 
+    // Accessibility support: report as text area so voice input tools can detect us
+    extern "C" fn accessibility_role(_this: &Object, _sel: Sel) -> id {
+        // NSAccessibilityTextAreaRole
+        unsafe { msg_send![class!(NSString), stringWithUTF8String: AX_ROLE_TEXT_AREA.as_ptr()] }
+    }
+
+    extern "C" fn is_accessibility_element(_this: &Object, _sel: Sel) -> BOOL {
+        YES
+    }
+
+    extern "C" fn accessibility_role_description(_this: &Object, _sel: Sel) -> id {
+        // Intentionally not localized. Voice input tools may key off this phrase.
+        unsafe {
+            msg_send![
+                class!(NSString),
+                stringWithUTF8String: AX_ROLE_DESCRIPTION_TERMINAL_TEXT_AREA.as_ptr()
+            ]
+        }
+    }
+
     extern "C" fn kaku_perform_key_assignment(
         this: &mut Object,
         _sel: Sel,
@@ -3440,6 +3586,13 @@ impl WindowView {
                 // with modifier-dependent escape fragments. Prefer vkey mapping
                 // so they normalize into stable key codes.
                 (true, unmod)
+            } else if modifiers == (Modifiers::SUPER | Modifiers::SHIFT)
+                && is_symbol_virtual_key(virtual_key)
+            {
+                // For Cmd+Shift+symbol combinations, prefer virtual-key decoding so
+                // bindings can match stable base keys like "," across layouts/IME.
+                // Use exact match to avoid affecting Cmd+Ctrl+Shift+symbol etc.
+                (true, unmod)
             } else {
                 (false, unmod)
             };
@@ -3772,10 +3925,7 @@ impl WindowView {
             virtual_key,
         );
 
-        let special_shortcut = (chars == "." && modifiers == Modifiers::SUPER)
-            || (chars == "\u{1b}" && modifiers == Modifiers::CTRL)
-            || (chars == "\t" && modifiers == Modifiers::CTRL)
-            || (chars == "\x19"/* Shift-Tab: See issue #1902 */);
+        let special_shortcut = should_intercept_special_shortcut(chars, modifiers, virtual_key);
 
         let command_non_menu_key =
             modifiers.contains(Modifiers::SUPER) && is_non_menu_virtual_key(virtual_key);
@@ -4160,6 +4310,23 @@ impl WindowView {
         }
     }
 
+    /// Returns the frame to use when zooming (maximizing) the window.
+    /// We return the screen's visible frame to ensure the window fills the entire
+    /// available space, ignoring resize increments that would otherwise cause
+    /// the window to not fill the screen completely.
+    /// <https://github.com/tw93/Kaku/issues/131>
+    extern "C" fn window_will_use_standard_frame(
+        _this: &mut Object,
+        _sel: Sel,
+        window: id,
+        _default_frame: NSRect,
+    ) -> NSRect {
+        unsafe {
+            let screen: id = msg_send![window, screen];
+            msg_send![screen, visibleFrame]
+        }
+    }
+
     extern "C" fn update_layer(_view: &mut Object, _sel: Sel) {
         log::trace!("update_layer called");
     }
@@ -4489,6 +4656,11 @@ impl WindowView {
                 Self::did_resize as extern "C" fn(&mut Object, Sel, id),
             );
             cls.add_method(
+                sel!(windowWillUseStandardFrame:defaultFrame:),
+                Self::window_will_use_standard_frame
+                    as extern "C" fn(&mut Object, Sel, id, NSRect) -> NSRect,
+            );
+            cls.add_method(
                 sel!(windowDidMove:),
                 Self::did_move as extern "C" fn(&mut Object, Sel, id),
             );
@@ -4657,6 +4829,20 @@ impl WindowView {
             cls.add_method(
                 sel!(performDragOperation:),
                 Self::perform_drag_operation as extern "C" fn(&mut Object, Sel, id) -> BOOL,
+            );
+
+            // Accessibility support for voice input tools like Typeless
+            cls.add_method(
+                sel!(accessibilityRole),
+                Self::accessibility_role as extern "C" fn(&Object, Sel) -> id,
+            );
+            cls.add_method(
+                sel!(isAccessibilityElement),
+                Self::is_accessibility_element as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            cls.add_method(
+                sel!(accessibilityRoleDescription),
+                Self::accessibility_role_description as extern "C" fn(&Object, Sel) -> id,
             );
         }
 

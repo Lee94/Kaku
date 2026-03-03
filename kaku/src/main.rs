@@ -14,6 +14,7 @@ mod ai_config;
 mod assistant_config;
 mod cli;
 mod config_cmd;
+mod config_tui;
 mod doctor;
 mod init;
 mod reset;
@@ -107,7 +108,7 @@ enum SubCommand {
     )]
     Ai(ai_config::AiConfigCommand),
 
-    #[command(name = "config", about = "Open and edit user kaku.lua configuration")]
+    #[command(name = "config", about = "Configure Kaku settings")]
     Config(config_cmd::ConfigCommand),
 
     #[command(name = "init", about = "Initialize Kaku shell integration")]

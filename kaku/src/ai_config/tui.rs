@@ -8,6 +8,7 @@ use crossterm::event::{
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -186,7 +187,7 @@ impl ToolState {
                 log::warn!("failed to read config for {}: {}", tool.label(), e);
                 return ToolState {
                     tool,
-                    installed: true,
+                    installed: false,
                     fields: vec![FieldEntry {
                         key: "error".into(),
                         value: format!("failed to read config: {}", e),
@@ -358,6 +359,59 @@ fn mask_key(val: &str) -> String {
     format!("{}...{}", &val[..12], &val[val.len() - 4..])
 }
 
+fn normalize_custom_header(value: &str) -> Option<String> {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (name, header_value) = raw.split_once(':')?;
+    let name = name.trim();
+    let header_value = header_value.trim();
+    if name.is_empty() || header_value.is_empty() {
+        return None;
+    }
+    if name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("content-type") {
+        return None;
+    }
+    Some(format!("{name}: {header_value}"))
+}
+
+fn normalize_custom_headers(values: Vec<String>) -> Vec<String> {
+    let mut dedup = HashSet::new();
+    values
+        .into_iter()
+        .filter_map(|item| normalize_custom_header(&item))
+        .filter(|header| {
+            let key = header
+                .split_once(':')
+                .map(|(name, _)| name)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            dedup.insert(key)
+        })
+        .collect()
+}
+
+fn parse_custom_headers_toml(value: Option<&toml::Value>) -> Vec<String> {
+    match value {
+        Some(toml::Value::Array(items)) => normalize_custom_headers(
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect(),
+        ),
+        Some(toml::Value::String(raw)) => normalize_custom_headers(
+            raw.split(',')
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect(),
+        ),
+        _ => vec![],
+    }
+}
+
 /// Configuration for the Kaku built-in AI assistant.
 ///
 /// This struct holds the configuration for Kaku's AI-powered command analysis
@@ -373,6 +427,8 @@ struct KakuAssistantConfig {
     model: String,
     /// Base URL for the API endpoint (never empty, falls back to default)
     base_url: String,
+    /// Optional extra request headers as `Name: Value`
+    custom_headers: Vec<String>,
 }
 
 impl KakuAssistantConfig {
@@ -404,7 +460,13 @@ impl KakuAssistantConfig {
             } else {
                 base_url
             },
+            custom_headers: vec![],
         }
+    }
+
+    fn with_custom_headers(mut self, custom_headers: Vec<String>) -> Self {
+        self.custom_headers = normalize_custom_headers(custom_headers);
+        self
     }
 
     /// Returns whether the assistant is enabled.
@@ -425,6 +487,10 @@ impl KakuAssistantConfig {
     /// Returns the base URL (never empty).
     fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    fn custom_headers(&self) -> &[String] {
+        &self.custom_headers
     }
 }
 
@@ -455,8 +521,9 @@ fn parse_kaku_assistant_config(raw: &str) -> KakuAssistantConfig {
         .get("base_url")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let custom_headers = parse_custom_headers_toml(parsed.get("custom_headers"));
 
-    KakuAssistantConfig::new(enabled, api_key, model, base_url)
+    KakuAssistantConfig::new(enabled, api_key, model, base_url).with_custom_headers(custom_headers)
 }
 
 fn get_kaku_assistant_api_key() -> Option<String> {
@@ -475,16 +542,22 @@ fn get_kaku_assistant_api_key() -> Option<String> {
     }
 }
 
+fn kaku_assistant_enabled_display(cfg: &KakuAssistantConfig) -> &'static str {
+    if !cfg.is_enabled() {
+        return "Off";
+    }
+    if cfg.api_key().trim().is_empty() {
+        return "Not configured";
+    }
+    "On"
+}
+
 fn extract_kaku_assistant_fields(raw: &str) -> Vec<FieldEntry> {
     let cfg = parse_kaku_assistant_config(raw);
     vec![
         FieldEntry {
             key: "Enabled".into(),
-            value: if cfg.is_enabled() {
-                "On".into()
-            } else {
-                "Off".into()
-            },
+            value: kaku_assistant_enabled_display(&cfg).into(),
             options: vec!["On".into(), "Off".into()],
             editable: true,
         },
@@ -521,7 +594,12 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
     );
     out.push_str("# api_key: provider API key, example: \"sk-xxxx\".\n");
     out.push_str("# model: model id, example: \"DeepSeek-V3.2\" or \"gpt-5-mini\".\n");
-    out.push_str("# base_url: chat-completions API root URL.\n\n");
+    out.push_str("# base_url: chat-completions API root URL.\n");
+    out.push_str(
+        "# custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n",
+    );
+    out.push_str("#                 format: [\"Header-Name: value\", \"Another-Header: value\"]\n");
+    out.push_str("#                 note: Authorization and Content-Type are reserved and cannot be overridden.\n\n");
     out.push_str(if cfg.is_enabled() {
         "enabled = true\n"
     } else {
@@ -543,6 +621,17 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
         "base_url = {}\n",
         render_toml_string(cfg.base_url().trim())
     ));
+    if cfg.custom_headers().is_empty() {
+        out.push_str("# custom_headers = [\"X-Customer-ID: your-customer-id\"]\n");
+    } else {
+        let arr = toml::Value::Array(
+            cfg.custom_headers()
+                .iter()
+                .map(|item| toml::Value::String(item.clone()))
+                .collect(),
+        );
+        out.push_str(&format!("custom_headers = {}\n", arr));
+    }
     write_atomic(path, out.as_bytes()).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
@@ -583,6 +672,7 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
         "Enabled" => {
             let enabled = matches!(new_val.trim(), "On" | "on" | "true" | "1");
             KakuAssistantConfig::new(enabled, cfg.api_key(), cfg.model(), cfg.base_url())
+                .with_custom_headers(cfg.custom_headers().to_vec())
         }
         "Model" => {
             let model = if new_val.trim().is_empty() || new_val == "—" {
@@ -591,6 +681,7 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
                 new_val.trim()
             };
             KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), model, cfg.base_url())
+                .with_custom_headers(cfg.custom_headers().to_vec())
         }
         "Base URL" => {
             let base_url = if new_val.trim().is_empty() || new_val == "—" {
@@ -599,13 +690,15 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
                 new_val.trim()
             };
             KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), cfg.model(), base_url)
+                .with_custom_headers(cfg.custom_headers().to_vec())
         }
         "API Key" => KakuAssistantConfig::new(
             cfg.is_enabled(),
             new_val.trim(),
             cfg.model(),
             cfg.base_url(),
-        ),
+        )
+        .with_custom_headers(cfg.custom_headers().to_vec()),
         _ => return Ok(()),
     };
 
@@ -831,8 +924,12 @@ fn fetch_models_dev_json() -> Option<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| log::debug!("failed to parse models.dev json: {}", e))
         .ok()?;
-    let _ = config::create_user_owned_dirs(&cache_dir);
-    let _ = std::fs::write(&cache_path, &raw);
+    if let Err(e) = config::create_user_owned_dirs(&cache_dir) {
+        log::debug!("Failed to create cache directory: {}", e);
+    }
+    if let Err(e) = std::fs::write(&cache_path, &raw) {
+        log::debug!("Failed to write models cache: {}", e);
+    }
     Some(v)
 }
 
@@ -1748,7 +1845,11 @@ fn status_value_for_display(field_key: &str, new_val: &str) -> String {
 
 impl App {
     fn new() -> Self {
-        let tools: Vec<ToolState> = ALL_TOOLS.iter().map(|t| ToolState::load(*t)).collect();
+        let tools: Vec<ToolState> = ALL_TOOLS
+            .iter()
+            .map(|t| ToolState::load(*t))
+            .filter(|t| t.tool == Tool::KakuAssistant || t.installed)
+            .collect();
         let first = tools.iter().position(|t| !t.fields.is_empty()).unwrap_or(0);
         let mut app = App {
             tools,
@@ -2066,15 +2167,26 @@ impl App {
         self.focus = Focus::ToolList;
     }
 
-    fn open_config(&self) {
+    fn open_config(&mut self) {
         let tool = &self.tools[self.tool_index];
         let path = tool.tool.config_path();
         if !path.exists() {
             return;
         }
-        let _ = std::process::Command::new("/usr/bin/open")
+        match std::process::Command::new("/usr/bin/open")
             .arg(&path)
-            .status();
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(_) => {
+                log::debug!("open command returned non-zero status");
+                self.status_msg = Some("Failed to open config file".into());
+            }
+            Err(e) => {
+                log::debug!("Failed to open config file: {}", e);
+                self.status_msg = Some(format!("Failed to open: {}", e));
+            }
+        }
     }
 
     fn refresh_models(&mut self) {
@@ -2083,11 +2195,17 @@ impl App {
             .join(".cache")
             .join("kaku")
             .join("models.json");
-        let _ = std::fs::remove_file(&cache_path);
+        if let Err(e) = std::fs::remove_file(&cache_path) {
+            log::trace!("Could not remove models cache: {}", e);
+        }
 
         match fetch_models_dev_json() {
             Some(_) => {
-                self.tools = ALL_TOOLS.iter().map(|t| ToolState::load(*t)).collect();
+                self.tools = ALL_TOOLS
+                    .iter()
+                    .map(|t| ToolState::load(*t))
+                    .filter(|t| t.tool == Tool::KakuAssistant || t.installed)
+                    .collect();
                 self.status_msg = Some("Models refreshed".into());
                 self.sync_transient_errors();
             }
@@ -2525,6 +2643,8 @@ pub fn run() -> anyhow::Result<()> {
     let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
     disable_raw_mode().context("disable raw mode")?;
     terminal.show_cursor().context("show cursor")?;
+    // Emit a trailing newline so zsh does not show a partial-line `%` indicator.
+    println!();
 
     result
 }
@@ -2542,7 +2662,9 @@ fn run_loop(
                 app.status_msg = None;
                 if app.is_selecting() {
                     match key.code {
-                        KeyCode::Enter => app.confirm_select(),
+                        KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') => {
+                            app.confirm_select()
+                        }
                         KeyCode::Esc => app.cancel_select(),
                         KeyCode::Up | KeyCode::Char('k') => app.move_select_up(),
                         KeyCode::Down | KeyCode::Char('j') => app.move_select_down(),
@@ -2553,7 +2675,9 @@ fn run_loop(
 
                 if app.is_editing() {
                     match key.code {
-                        KeyCode::Enter => app.confirm_edit(),
+                        KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') => {
+                            app.confirm_edit()
+                        }
                         KeyCode::Esc => app.cancel_edit(),
                         KeyCode::Left => {
                             if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
@@ -2633,7 +2757,7 @@ fn run_loop(
                     }
                     KeyCode::Up | KeyCode::Char('k') => app.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => app.move_down(),
-                    KeyCode::Enter => app.start_edit(),
+                    KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') => app.start_edit(),
                     KeyCode::Char('o') => app.open_config(),
                     KeyCode::Char('r') => app.refresh_models(),
                     _ => {}
@@ -2649,16 +2773,22 @@ fn run_loop(
                     continue;
                 }
 
+                let ends_with_newline = text.ends_with('\n') || text.ends_with('\r');
+
                 // Clipboard paste may include a trailing newline from terminal copy.
-                // Strip line breaks so paste doesn't immediately trigger submit behavior.
+                // Strip line breaks so paste doesn't break single-line inputs.
                 let cleaned: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
-                if cleaned.is_empty() {
-                    continue;
-                }
-                if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
-                    for c in cleaned.chars() {
-                        edit_insert_char(edit_buf, edit_cursor, c);
+                if !cleaned.is_empty() {
+                    if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                        for c in cleaned.chars() {
+                            edit_insert_char(edit_buf, edit_cursor, c);
+                        }
                     }
+                }
+
+                // If the pasted text (often from voice typing tools) ends with a newline, auto-submit
+                if ends_with_newline {
+                    app.confirm_edit();
                 }
             }
             _ => {}
@@ -2870,5 +3000,25 @@ mod tests {
             Some("gpt-5.1-codex")
         );
         assert_eq!(session_defaults.get("reasoningEffort"), None);
+    }
+
+    #[test]
+    fn kaku_assistant_enabled_shows_not_configured_without_api_key() {
+        let fields = extract_kaku_assistant_fields("enabled = true\n");
+        let enabled = fields
+            .iter()
+            .find(|f| f.key == "Enabled")
+            .expect("enabled field");
+        assert_eq!(enabled.value, "Not configured");
+    }
+
+    #[test]
+    fn kaku_assistant_enabled_shows_off_when_disabled() {
+        let fields = extract_kaku_assistant_fields("enabled = false\n");
+        let enabled = fields
+            .iter()
+            .find(|f| f.key == "Enabled")
+            .expect("enabled field");
+        assert_eq!(enabled.value, "Off");
     }
 }

@@ -2,11 +2,12 @@ use crate::connection::ConnectionOps;
 use crate::macos::menu::RepresentedItem;
 use crate::macos::{nsstring, nsstring_to_str};
 use crate::menu::{Menu, MenuItem};
-use crate::{ApplicationEvent, Connection};
+use crate::{ApplicationEvent, Connection, KeyCode, Modifiers};
 use cocoa::appkit::{
-    NSApp, NSApplicationTerminateReply, NSFilenamesPboardType, NSStringPboardType,
+    NSApp, NSApplicationActivateIgnoringOtherApps, NSApplicationTerminateReply,
+    NSFilenamesPboardType, NSRunningApplication, NSStringPboardType,
 };
-use cocoa::base::id;
+use cocoa::base::{id, nil};
 use cocoa::foundation::NSInteger;
 use config::keyassignment::KeyAssignment;
 use config::WindowCloseConfirmation;
@@ -15,13 +16,70 @@ use objc::rc::StrongPtr;
 use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
 use objc::*;
 use std::cell::RefCell;
+use std::convert::TryFrom;
+use std::ffi::c_void;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use url::Url;
 
+use super::keycodes::phys_to_vkey;
+
 const CLS_NAME: &str = "KakuAppDelegate";
+
+type OSStatus = i32;
+type EventHotKeyRef = *mut c_void;
+type EventTargetRef = *mut c_void;
+type EventHandlerCallRef = *mut c_void;
+type EventRef = *mut c_void;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EventTypeSpec {
+    event_class: u32,
+    event_kind: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EventHotKeyID {
+    signature: u32,
+    id: u32,
+}
+
+const NO_ERR: OSStatus = 0;
+const K_EVENT_CLASS_KEYBOARD: u32 = 0x6b657962;
+const K_EVENT_HOT_KEY_PRESSED: u32 = 6;
+
+const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"KAKU");
+const HOTKEY_ID: u32 = 1;
+
+const SHIFT_KEY: u32 = 1 << 9;
+const OPTION_KEY: u32 = 1 << 11;
+const CONTROL_KEY: u32 = 1 << 12;
+const CMD_KEY: u32 = 1 << 8;
+
+unsafe extern "C" {
+    fn InstallEventHandler(
+        target: EventTargetRef,
+        handler: extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> OSStatus,
+        num_types: u32,
+        list: *const EventTypeSpec,
+        user_data: *mut c_void,
+        out_ref: *mut *mut c_void,
+    ) -> OSStatus;
+    fn RegisterEventHotKey(
+        hot_key_code: u32,
+        hot_key_modifiers: u32,
+        hot_key_id: EventHotKeyID,
+        target: EventTargetRef,
+        options: u32,
+        out_ref: *mut EventHotKeyRef,
+    ) -> OSStatus;
+    fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> OSStatus;
+    fn GetApplicationEventTarget() -> EventTargetRef;
+}
 
 thread_local! {
     static LAST_OPEN_UNTITLED_SPAWN: RefCell<Option<Instant>> = RefCell::new(None);
@@ -31,6 +89,8 @@ lazy_static::lazy_static! {
     static ref PENDING_SERVICE_OPENS: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
     static ref PENDING_TTY_ACTIVATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static ref LAST_SERVICE_OPEN_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
+    static ref GLOBAL_HOTKEY_STATE: Mutex<GlobalHotKeyState> =
+        Mutex::new(GlobalHotKeyState::default());
 }
 // macOS can emit applicationOpenUntitledFile twice while no window has
 // materialized yet; keep a wider debounce to avoid duplicate SpawnWindow work.
@@ -96,6 +156,195 @@ fn schedule_open_untitled_spawn() {
         .detach();
     })
     .detach();
+}
+
+#[derive(Default)]
+struct GlobalHotKeyState {
+    handler_installed: bool,
+    hotkey_ref: Option<usize>,
+}
+
+fn keycode_to_macos_vkey(key: &KeyCode) -> Option<u32> {
+    match key {
+        KeyCode::RawCode(raw) => u16::try_from(*raw).ok().map(u32::from),
+        _ => key.to_phys().and_then(phys_to_vkey).map(u32::from),
+    }
+}
+
+fn mods_to_carbon_flags(mods: Modifiers) -> u32 {
+    let mods = mods.remove_positional_mods();
+    let mut flags = 0;
+    if mods.contains(Modifiers::SHIFT) {
+        flags |= SHIFT_KEY;
+    }
+    if mods.contains(Modifiers::ALT) {
+        flags |= OPTION_KEY;
+    }
+    if mods.contains(Modifiers::CTRL) {
+        flags |= CONTROL_KEY;
+    }
+    if mods.contains(Modifiers::SUPER) {
+        flags |= CMD_KEY;
+    }
+    flags
+}
+
+fn configured_global_hotkey() -> Option<(u32, u32)> {
+    let config = config::configuration();
+    let hotkey = config.macos_global_hotkey.clone()?;
+    let key = hotkey.key.resolve(config.key_map_preference);
+    let Some(vkey) = keycode_to_macos_vkey(&key) else {
+        log::warn!("macos_global_hotkey key {key:?} cannot be mapped to a macOS virtual key");
+        return None;
+    };
+
+    let supported = Modifiers::SHIFT | Modifiers::ALT | Modifiers::CTRL | Modifiers::SUPER;
+    let cleaned_mods = hotkey.mods.remove_positional_mods();
+    let unsupported = cleaned_mods & !supported;
+    if unsupported != Modifiers::NONE {
+        log::warn!("macos_global_hotkey has unsupported modifiers: {unsupported:?}");
+    }
+
+    let flags = mods_to_carbon_flags(cleaned_mods);
+    if flags == 0 {
+        log::warn!("macos_global_hotkey requires at least one modifier key");
+        return None;
+    }
+
+    Some((vkey, flags))
+}
+
+fn uninstall_registered_hotkey(state: &mut GlobalHotKeyState) {
+    if let Some(hotkey_ref) = state.hotkey_ref.take() {
+        let status = unsafe { UnregisterEventHotKey(hotkey_ref as EventHotKeyRef) };
+        if status != NO_ERR {
+            log::warn!("UnregisterEventHotKey failed with status={status}");
+        }
+    }
+}
+
+fn ensure_hotkey_handler_installed(state: &mut GlobalHotKeyState) -> bool {
+    if state.handler_installed {
+        return true;
+    }
+
+    let target = unsafe { GetApplicationEventTarget() };
+    if target.is_null() {
+        log::warn!("GetApplicationEventTarget returned null");
+        return false;
+    }
+
+    let spec = EventTypeSpec {
+        event_class: K_EVENT_CLASS_KEYBOARD,
+        event_kind: K_EVENT_HOT_KEY_PRESSED,
+    };
+    let mut handler_ref: *mut c_void = std::ptr::null_mut();
+    let status = unsafe {
+        InstallEventHandler(
+            target,
+            global_hotkey_event_handler,
+            1,
+            &spec,
+            std::ptr::null_mut(),
+            &mut handler_ref,
+        )
+    };
+    if status != NO_ERR {
+        log::warn!("InstallEventHandler failed with status={status}");
+        return false;
+    }
+    state.handler_installed = true;
+    true
+}
+
+fn toggle_hotkey_window() {
+    let Some(conn) = Connection::get() else {
+        log::warn!("global hotkey pressed before GUI connection is ready");
+        return;
+    };
+
+    let is_active: BOOL = unsafe { msg_send![NSApp(), isActive] };
+    if is_active == YES {
+        // [NSApp hide:] is a no-op when a window is in native fullscreen.
+        // Instead, directly order out each window so it disappears without
+        // leaving fullscreen. The window keeps its fullscreen state and will
+        // restore on the next hotkey press via makeKeyAndOrderFront:.
+        let has_fullscreen = {
+            let windows = conn.windows.borrow();
+            let mut any_fs = false;
+            for window in windows.values() {
+                let mut inner = window.borrow_mut();
+                if inner.is_fullscreen() {
+                    any_fs = true;
+                    inner.order_out();
+                }
+            }
+            any_fs
+        };
+        if has_fullscreen {
+            // Deactivate the app so macOS switches to the next app.
+            unsafe {
+                let () = msg_send![NSApp(), hide: NSApp()];
+            }
+        } else {
+            conn.hide_application();
+        }
+        return;
+    }
+
+    let existing_window = {
+        let windows = conn.windows.borrow();
+        windows.values().next().cloned()
+    };
+
+    if let Some(window) = existing_window {
+        unsafe {
+            let current_app = NSRunningApplication::currentApplication(nil);
+            current_app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps);
+        }
+        window.borrow_mut().focus();
+    } else {
+        conn.dispatch_app_event(ApplicationEvent::PerformKeyAssignment(
+            KeyAssignment::SpawnWindow,
+        ));
+    }
+}
+
+extern "C" fn global_hotkey_event_handler(
+    _next_handler: EventHandlerCallRef,
+    _event: EventRef,
+    _user_data: *mut c_void,
+) -> OSStatus {
+    toggle_hotkey_window();
+    NO_ERR
+}
+
+pub(crate) fn sync_global_hotkey_registration() {
+    let mut state = GLOBAL_HOTKEY_STATE.lock().unwrap();
+
+    uninstall_registered_hotkey(&mut state);
+
+    let Some((vkey, flags)) = configured_global_hotkey() else {
+        return;
+    };
+
+    if !ensure_hotkey_handler_installed(&mut state) {
+        return;
+    }
+
+    let mut hotkey_ref: EventHotKeyRef = std::ptr::null_mut();
+    let hotkey_id = EventHotKeyID {
+        signature: HOTKEY_SIGNATURE,
+        id: HOTKEY_ID,
+    };
+    let target = unsafe { GetApplicationEventTarget() };
+    let status = unsafe { RegisterEventHotKey(vkey, flags, hotkey_id, target, 0, &mut hotkey_ref) };
+    if status != NO_ERR || hotkey_ref.is_null() {
+        log::warn!("RegisterEventHotKey failed with status={status}");
+        return;
+    }
+
+    state.hotkey_ref = Some(hotkey_ref as usize);
 }
 
 fn reap_kaku_autofill_helpers() {
@@ -173,6 +422,7 @@ fn terminate_now() -> u64 {
     // may not fire for every window before the process exits.
     super::window::on_app_terminating();
     reap_kaku_autofill_helpers();
+    uninstall_registered_hotkey(&mut GLOBAL_HOTKEY_STATE.lock().unwrap());
     if let Some(conn) = Connection::get() {
         conn.terminate_message_loop();
     }
@@ -193,6 +443,33 @@ extern "C" fn application_did_finish_launching(this: &mut Object, _sel: Sel, _no
     unsafe {
         let () = msg_send![NSApp(), setServicesProvider: this as *mut Object];
         (*this).set_ivar("launched", YES);
+
+        // Register for screen wake notifications to update OpenGL contexts
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let notification_center: id = msg_send![workspace, notificationCenter];
+        let notification_name = nsstring("NSWorkspaceScreensDidWakeNotification");
+        let () = msg_send![notification_center,
+            addObserver: this as *mut Object
+            selector: sel!(screensDidWake:)
+            name: *notification_name
+            object: nil
+        ];
+        log::debug!("registered for NSWorkspaceScreensDidWakeNotification");
+    }
+    sync_global_hotkey_registration();
+}
+
+/// Called when the system wakes from sleep. Updates all OpenGL contexts to
+/// prevent crashes from stale surfaces when AppKit tries to flush the backing layer.
+extern "C" fn screens_did_wake(_self: &mut Object, _sel: Sel, _notification: *mut Object) {
+    log::debug!("NSWorkspaceScreensDidWakeNotification received, updating OpenGL contexts");
+    if let Some(conn) = Connection::get() {
+        let windows = conn.windows.borrow();
+        for window in windows.values() {
+            if let Ok(mut inner) = window.try_borrow_mut() {
+                inner.update_opengl_context_after_wake();
+            }
+        }
     }
 }
 
@@ -620,6 +897,10 @@ fn get_class() -> &'static Class {
                 sel!(openInKakuWindowService:userData:error:),
                 open_in_kaku_window_service
                     as extern "C" fn(&mut Object, Sel, *mut Object, *mut Object, *mut Object),
+            );
+            cls.add_method(
+                sel!(screensDidWake:),
+                screens_did_wake as extern "C" fn(&mut Object, Sel, *mut Object),
             );
         }
 

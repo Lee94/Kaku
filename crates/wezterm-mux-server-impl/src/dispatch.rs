@@ -134,7 +134,7 @@ where
             })) => {
                 Pdu::SetClipboard(codec::SetClipboard {
                     pane_id,
-                    clipboard,
+                    clipboard: clipboard.map(|s| s.to_string()),
                     selection,
                 })
                 .encode_async(&mut stream, 0)

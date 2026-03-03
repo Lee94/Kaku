@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-CURRENT_CONFIG_VERSION=11
+CURRENT_CONFIG_VERSION=12
 CONFIG_DIR="$HOME/.config/kaku"
 STATE_FILE="$CONFIG_DIR/state.json"
 LEGACY_VERSION_FILE="$CONFIG_DIR/.kaku_config_version"
@@ -162,7 +162,7 @@ fi
 if [[ "$INSTALL_SHELL" == "true" ]]; then
 	if [[ -f "$TOOLS_SCRIPT" ]]; then
 		echo ""
-		if ! bash "$TOOLS_SCRIPT"; then
+		if ! KAKU_AUTO_INSTALL_TOOLS=1 bash "$TOOLS_SCRIPT"; then
 			echo "Warning: optional tool installation failed."
 		fi
 	else

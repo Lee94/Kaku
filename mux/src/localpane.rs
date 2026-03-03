@@ -1,7 +1,7 @@
 use crate::domain::DomainId;
 use crate::pane::{
-    CachePolicy, CloseReason, ForEachPaneLogicalLine, LogicalLine, Pane, PaneId, Pattern,
-    SearchResult, WithPaneLines,
+    CachePolicy, CloseReason, ForEachPaneLogicalLine, LogicalLine, Pane, PaneId, PaneReader,
+    Pattern, SearchResult, WithPaneLines,
 };
 use crate::renderable::*;
 use crate::tmux::{TmuxDomain, TmuxDomainState};
@@ -448,8 +448,16 @@ impl Pane for LocalPane {
         })
     }
 
-    fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
-        Ok(Some(self.pty.lock().try_clone_reader()?))
+    fn reader(&self) -> anyhow::Result<Option<PaneReader>> {
+        let pty = self.pty.lock();
+        let reader = pty.try_clone_reader()?;
+        #[cfg(unix)]
+        let fd = pty.as_raw_fd();
+        Ok(Some(PaneReader {
+            reader,
+            #[cfg(unix)]
+            fd,
+        }))
     }
 
     fn send_paste(&self, text: &str) -> Result<(), Error> {
@@ -1149,13 +1157,9 @@ impl LocalPane {
         None
     }
 
-    #[allow(dead_code)]
     fn divine_foreground_process(&self, policy: CachePolicy) -> Option<LocalProcessInfo> {
-        if let Some(info) = self.divine_process_list(policy) {
-            Some(info.foreground.clone())
-        } else {
-            None
-        }
+        self.divine_process_list(policy)
+            .map(|info| info.foreground.clone())
     }
 }
 

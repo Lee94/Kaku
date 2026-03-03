@@ -37,6 +37,7 @@ Kaku comes with intuitive macOS-native shortcuts:
 
 | Action | Shortcut |
 | :--- | :--- |
+| Toggle Global Window | `Cmd + Opt + Ctrl + K` |
 | New Tab | `Cmd + T` |
 | New Window | `Cmd + N` |
 | Close Tab/Pane | `Cmd + W` |
@@ -57,6 +58,16 @@ Kaku comes with intuitive macOS-native shortcuts:
 | Smart Jump | `z <dir>` |
 | Smart Select | `z -l <dir>` |
 | Recent Dirs | `z -t` |
+
+### Intuitive Interactions
+
+- **Visual Bell**: A blinking dot appears on inactive tabs when background tasks finish.
+- **Active Pane**: A subtle dot highlights the currently focused pane during split-screen workflows.
+- **Global Hotkey**: Press `Cmd + Opt + Ctrl + K` anytime to float Kaku over your current workspace.
+- **Copy on Select**: Highlighting any text automatically copies it to your clipboard with a confirmation toast.
+- **Zoom Window**: Double-click the title bar or tab bar empty space to safely zoom or unzoom the window.
+- **Finder Integration**: Right-click folders in macOS Finder and deploy Kaku via Services, or drop multiple files directly onto the Kaku Dock icon.
+- **History Peek**: Scroll up while inside full-screen apps like `less` or `vim` to lift the screen and peek at your primary shell history without exiting.
 
 ## Configuration
 
@@ -87,7 +98,7 @@ Kaku includes a built-in assistant for command-line error recovery and a unified
 - **Kaku Assistant**: Automatically analyzes failed commands and prepares a safe command suggestion.
 - **AI Tools Config**: Manage settings for tools like Claude Code, Codex, Gemini CLI, Copilot CLI, Factory Droid, OpenCode, and OpenClaw.
 
-Open AI settings with `kaku ai`, then configure **Kaku Assistant** (enable, model, base URL, API key) and your external AI tools in one place.
+Open AI settings with `kaku ai`, then configure **Kaku Assistant** (enable, model, base URL, API key, custom headers) and your external AI tools in one place.
 
 Tip: DeepSeek-V3.2 is a great low-cost option to start with for everyday AI coding tasks.
 
@@ -116,29 +127,54 @@ Achieved through aggressive stripping of unused features, lazy loading of color 
 
 ## FAQ
 
-1. **Why is the Homebrew cask named `kakuku` instead of `kaku`?**
-
-   The name `kaku` conflicts with another package in Homebrew's official repository (an unmaintained music player). `kakuku` is a cute variation that's easy to remember.
-
-2. **Is there a Windows or Linux version?**
+1. **Is there a Windows or Linux version?**
 
    Not at the moment. Kaku is currently macOS-only while we focus on polishing the macOS experience. Windows and Linux versions may come later once the macOS version is mature.
 
-3. **Can Kaku use transparent windows on macOS?**
+2. **Can Kaku use transparent windows on macOS?**
 
    Yes. You can set `window_background_opacity` and optionally `macos_window_background_blur` in `~/.config/kaku/kaku.lua`. Transparent mode now keeps top/right/bottom padding regions visually consistent to avoid transparent gaps.
 
-4. **How do I turn off copy on select?**
+3. **How do I turn off copy on select?**
 
    Kaku enables copy on select by default; to disable automatic clipboard copy and copy toast after selection, add `config.copy_on_select = false` to `~/.config/kaku/kaku.lua`.
 
-5. **Can I control working directory inheritance separately for new window, tab, and split?**
+4. **Can I control working directory inheritance separately for new window, tab, and split?**
 
    Yes. Use these options in `~/.config/kaku/kaku.lua`:
    `config.window_inherit_working_directory`
    `config.tab_inherit_working_directory`
    `config.split_pane_inherit_working_directory`
    All are enabled by default.
+
+5. **The `kaku` command is missing. How can I recover it and troubleshoot with Kaku Doctor?**
+
+   Open Kaku Doctor from the Shell menu first. This diagnostic path can still run when your shell command entry is missing and will tell you what to repair.
+
+   Then run this command in a terminal to restore the shell entry:
+
+   ```bash
+   /Applications/Kaku.app/Contents/MacOS/kaku init --update-only
+   exec zsh -l
+   ```
+
+   Finally run `kaku doctor` in your terminal to verify everything is healthy.
+
+6. **How can I use Kaku's CLI capabilities (like `split-pane`) from other scripts or tools?**
+
+   Kaku exposes a powerful CLI for interacting with its multiplexer. For example, to split the current pane, run:
+
+   ```bash
+   kaku cli split-pane
+   ```
+
+   To split it and run a specific command instead of your default shell:
+
+   ```bash
+   kaku cli split-pane -- bash -c "echo Hello"
+   ```
+
+   You can explore all available CLI commands by running `kaku cli --help` or specifically `kaku cli split-pane --help`. This is very useful when integrating Kaku with workflows or AI tools.
 
 ## Contributors
 

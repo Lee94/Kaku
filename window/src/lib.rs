@@ -274,8 +274,15 @@ pub trait WindowOps {
         Ok(())
     }
 
-    /// Hide a visible window
+    /// Hide a visible window (minimize to Dock)
     fn hide(&self);
+
+    /// Remove the window from screen without minimize animation.
+    /// Used by macOS close button to hide window while preserving running commands.
+    fn order_out(&self) {
+        // Default implementation falls back to hide for non-macOS platforms
+        self.hide();
+    }
 
     /// Schedule the window to be closed
     fn close(&self);

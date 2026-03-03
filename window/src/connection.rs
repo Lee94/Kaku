@@ -101,6 +101,9 @@ pub trait ConnectionOps {
     /// Replay any queued platform service events once app event handlers are ready.
     fn flush_pending_service_events(&self) {}
 
+    /// Synchronize platform global hotkey registration from current config.
+    fn sync_global_hotkey(&self) {}
+
     /// Perform the system beep/notification sound
     fn beep(&self) {}
 

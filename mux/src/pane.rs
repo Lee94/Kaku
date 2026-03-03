@@ -9,6 +9,8 @@ use rangeset::RangeSet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Range;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 use std::sync::Arc;
 use termwiz::hyperlink::Rule;
 use termwiz::input::KeyboardEncoding;
@@ -26,6 +28,14 @@ pub type PaneId = usize;
 
 pub fn alloc_pane_id() -> PaneId {
     PANE_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Holds a pane's reader along with the optional raw file descriptor
+/// for polling on Unix platforms.
+pub struct PaneReader {
+    pub reader: Box<dyn std::io::Read + Send>,
+    #[cfg(unix)]
+    pub fd: Option<RawFd>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,7 +246,7 @@ pub trait Pane: Downcast + Send + Sync {
         Progress::None
     }
     fn send_paste(&self, text: &str) -> anyhow::Result<()>;
-    fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>>;
+    fn reader(&self) -> anyhow::Result<Option<PaneReader>>;
     fn writer(&self) -> MappedMutexGuard<'_, dyn std::io::Write>;
     fn resize(&self, size: TerminalSize) -> anyhow::Result<()>;
     /// Resize terminal state only without notifying the PTY.
@@ -643,7 +653,7 @@ mod test {
         fn send_paste(&self, _: &str) -> anyhow::Result<()> {
             unimplemented!()
         }
-        fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+        fn reader(&self) -> anyhow::Result<Option<PaneReader>> {
             Ok(None)
         }
         fn writer(&self) -> MappedMutexGuard<'_, dyn std::io::Write> {

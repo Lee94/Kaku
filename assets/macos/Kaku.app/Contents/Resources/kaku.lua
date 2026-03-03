@@ -143,33 +143,138 @@ local function padding_matches(current, expected)
     and current.bottom == expected.bottom
 end
 
-local fullscreen_uniform_padding = {
-  left = '20px',
-  right = '20px',
-  top = '20px',
-  bottom = '0px',
-}
+-- Detect if user has custom config overrides in their config file.
+-- Resolve the user config path, respecting XDG_CONFIG_HOME when set.
+local function kaku_user_config_path()
+  local xdg = os.getenv('XDG_CONFIG_HOME')
+  if xdg and xdg ~= '' then
+    return xdg .. '/kaku/kaku.lua'
+  end
+  local home = os.getenv('HOME')
+  if home then
+    return home .. '/.config/kaku/kaku.lua'
+  end
+  return nil
+end
 
-local default_uniform_padding = {
-  left = '40px',
-  right = '40px',
-  top = '70px',
-  bottom = '20px',
-}
+local user_has_custom_padding = false
+local user_has_custom_hide_tab_bar = false
+local user_has_custom_content_alignment = false
 
-local yazi_uniform_padding = {
-  left = '40px',
-  right = '40px',
-  top = '70px',
-  bottom = '0px',
-}
+local function check_user_custom_config()
+  local user_config_path = kaku_user_config_path()
+  if not user_config_path then
+    return
+  end
+  local file = io.open(user_config_path, 'r')
+  if not file then
+    return
+  end
+  -- Check if user explicitly sets these configs (skip comment lines).
+  for line in file:lines() do
+    local trimmed = line:match('^%s*(.-)%s*$')
+    if trimmed and not trimmed:match('^%-%-') then
+      if trimmed:match('^config%.window_padding%s*=') then
+        user_has_custom_padding = true
+      end
+      if trimmed:match('^config%.hide_tab_bar_if_only_one_tab%s*=') then
+        user_has_custom_hide_tab_bar = true
+      end
+      if trimmed:match('^config%.window_content_alignment%s*=') then
+        user_has_custom_content_alignment = true
+      end
+    end
+  end
+  file:close()
+end
+check_user_custom_config()
 
-local yazi_fullscreen_padding = {
-  left = '20px',
-  right = '20px',
-  top = '10px',
-  bottom = '0px',
-}
+-- Two-tier display detection.
+-- low resolution screens use smaller spacing and 15px font.
+-- high resolution screens use default spacing and 17px font.
+local function is_low_resolution_screen()
+  local success, screens = pcall(function()
+    return wezterm.gui.screens()
+  end)
+  if success and screens and screens.main then
+    local main = screens.main
+    local width = tonumber(main.width or 0) or 0
+    local height = tonumber(main.height or 0) or 0
+    local short_edge = math.min(width, height)
+    -- Inline builtin screen detection.
+    local name = string.lower(tostring(main.name or ''))
+    local is_builtin = name == 'color lcd'
+      or string.find(name, 'built-in', 1, true)
+      or string.find(name, 'built in', 1, true)
+      or string.find(name, '内建', 1, true)
+    if short_edge > 0 then
+      if is_builtin then
+        return short_edge <= 1700
+      end
+      return short_edge < 1800
+    end
+  end
+  return false
+end
+
+local function is_light_theme()
+  -- Check user config for color_scheme setting
+  local user_config_path = kaku_user_config_path()
+  if not user_config_path then
+    return false
+  end
+  local file = io.open(user_config_path, 'r')
+  if not file then
+    return false
+  end
+  for line in file:lines() do
+    local trimmed = line:match('^%s*(.-)%s*$')
+    if trimmed and not trimmed:match('^%-%-') then
+      if trimmed:match("^config%.color_scheme%s*=%s*['\"]Kaku Light['\"]") then
+        file:close()
+        return true
+      end
+    end
+  end
+  file:close()
+  return false
+end
+
+-- Compute once; all spacing helpers below share this result.
+local low_resolution_screen = is_low_resolution_screen()
+
+local function get_default_padding()
+  if low_resolution_screen then
+    return { left = '26px', right = '26px', top = '26px', bottom = '14px' }
+  end
+  return { left = '40px', right = '40px', top = '40px', bottom = '20px' }
+end
+
+local function get_fullscreen_padding()
+  if low_resolution_screen then
+    return { left = '14px', right = '14px', top = '14px', bottom = '0px' }
+  end
+  return { left = '20px', right = '20px', top = '20px', bottom = '0px' }
+end
+
+local function get_yazi_padding()
+  if low_resolution_screen then
+    return { left = '26px', right = '26px', top = '26px', bottom = '0px' }
+  end
+  return { left = '40px', right = '40px', top = '40px', bottom = '0px' }
+end
+
+local function get_yazi_fullscreen_padding()
+  if low_resolution_screen then
+    return { left = '14px', right = '14px', top = '8px', bottom = '0px' }
+  end
+  return { left = '20px', right = '20px', top = '10px', bottom = '0px' }
+end
+
+local fullscreen_uniform_padding = get_fullscreen_padding()
+local default_uniform_padding = get_default_padding()
+local yazi_uniform_padding = get_yazi_padding()
+local yazi_fullscreen_padding = get_yazi_fullscreen_padding()
 
 -- Per-window resize debounce state.
 -- Weak keys ensure closed windows don't leak state.
@@ -205,29 +310,59 @@ local function update_window_config(window, is_full_screen, pane)
   local needs_update = false
   local pane_is_yazi_active = pane_is_yazi(pane)
 
+  -- Determine expected padding based on mode.
+  local expected_padding
   if pane_is_yazi_active and is_full_screen then
-    local align = overrides.window_content_alignment
-    local align_is_center = type(align) == 'table'
-      and align.vertical == 'Center' and align.horizontal == 'Left'
-    needs_update = (not padding_matches(overrides.window_padding, yazi_fullscreen_padding))
-      or overrides.hide_tab_bar_if_only_one_tab ~= false
-      or not align_is_center
+    expected_padding = yazi_fullscreen_padding
   elseif pane_is_yazi_active then
-    needs_update = (not padding_matches(overrides.window_padding, yazi_uniform_padding))
-      or overrides.hide_tab_bar_if_only_one_tab ~= nil
-      or overrides.window_content_alignment ~= nil
+    expected_padding = yazi_uniform_padding
   elseif is_full_screen then
-    local align = overrides.window_content_alignment
-    local align_is_center = type(align) == 'table'
-      and align.vertical == 'Center' and align.horizontal == 'Left'
-    needs_update = (not padding_matches(overrides.window_padding, fullscreen_uniform_padding))
-      or overrides.hide_tab_bar_if_only_one_tab ~= false
-      or not align_is_center
+    expected_padding = fullscreen_uniform_padding
   else
-    needs_update = (not padding_matches(overrides.window_padding, default_uniform_padding))
-      or overrides.hide_tab_bar_if_only_one_tab ~= nil
-      or overrides.window_content_alignment ~= nil
+    expected_padding = default_uniform_padding
   end
+
+  -- Check if each setting needs update (skip if user has custom config).
+  local padding_needs_update = false
+  if not user_has_custom_padding then
+    padding_needs_update = not padding_matches(overrides.window_padding, expected_padding)
+  end
+
+  local tab_bar_needs_update = false
+  if not user_has_custom_hide_tab_bar then
+    if pane_is_yazi_active and is_full_screen then
+      tab_bar_needs_update = overrides.hide_tab_bar_if_only_one_tab ~= false
+    elseif pane_is_yazi_active then
+      tab_bar_needs_update = overrides.hide_tab_bar_if_only_one_tab ~= nil
+    elseif is_full_screen then
+      tab_bar_needs_update = overrides.hide_tab_bar_if_only_one_tab ~= false
+    else
+      tab_bar_needs_update = overrides.hide_tab_bar_if_only_one_tab ~= nil
+    end
+  end
+
+  local alignment_needs_update = false
+  if not user_has_custom_content_alignment then
+    if pane_is_yazi_active and is_full_screen then
+      local align = overrides.window_content_alignment
+      local align_is_center = type(align) == 'table'
+        and align.vertical == 'Center' and align.horizontal == 'Left'
+      alignment_needs_update = not align_is_center
+    elseif pane_is_yazi_active then
+      alignment_needs_update = overrides.window_content_alignment ~= nil
+    elseif is_full_screen then
+      local align = overrides.window_content_alignment
+      local align_is_center = type(align) == 'table'
+        and align.vertical == 'Center' and align.horizontal == 'Left'
+      alignment_needs_update = not align_is_center
+    else
+      alignment_needs_update = overrides.window_content_alignment ~= nil
+    end
+  end
+
+  needs_update = padding_needs_update
+    or tab_bar_needs_update
+    or alignment_needs_update
 
   -- Skip update if dimensions changed rapidly (within 1 second) and state is stable
   -- This prevents padding flicker during fullscreen animation
@@ -247,22 +382,33 @@ local function update_window_config(window, is_full_screen, pane)
     return
   end
 
-  if pane_is_yazi_active and is_full_screen then
-    overrides.window_padding = yazi_fullscreen_padding
-    overrides.hide_tab_bar_if_only_one_tab = false
-    overrides.window_content_alignment = { horizontal = 'Left', vertical = 'Center' }
-  elseif pane_is_yazi_active then
-    overrides.window_padding = yazi_uniform_padding
-    overrides.hide_tab_bar_if_only_one_tab = nil
-    overrides.window_content_alignment = nil
-  elseif is_full_screen then
-    overrides.window_padding = fullscreen_uniform_padding
-    overrides.hide_tab_bar_if_only_one_tab = false
-    overrides.window_content_alignment = { horizontal = 'Left', vertical = 'Center' }
-  else
-    overrides.window_padding = default_uniform_padding
-    overrides.hide_tab_bar_if_only_one_tab = nil
-    overrides.window_content_alignment = nil
+  -- Apply settings only if user hasn't customized them.
+  if not user_has_custom_padding then
+    overrides.window_padding = expected_padding
+  end
+
+  if not user_has_custom_hide_tab_bar then
+    if pane_is_yazi_active and is_full_screen then
+      overrides.hide_tab_bar_if_only_one_tab = false
+    elseif pane_is_yazi_active then
+      overrides.hide_tab_bar_if_only_one_tab = nil
+    elseif is_full_screen then
+      overrides.hide_tab_bar_if_only_one_tab = false
+    else
+      overrides.hide_tab_bar_if_only_one_tab = nil
+    end
+  end
+
+  if not user_has_custom_content_alignment then
+    if pane_is_yazi_active and is_full_screen then
+      overrides.window_content_alignment = { horizontal = 'Left', vertical = 'Center' }
+    elseif pane_is_yazi_active then
+      overrides.window_content_alignment = nil
+    elseif is_full_screen then
+      overrides.window_content_alignment = { horizontal = 'Left', vertical = 'Center' }
+    else
+      overrides.window_content_alignment = nil
+    end
   end
 
   window:set_config_overrides(overrides)
@@ -464,6 +610,79 @@ local function parse_ai_toml_setting_value(raw_value)
   return strip_wrapping_quotes(value)
 end
 
+local function parse_ai_toml_custom_headers(raw_value)
+  local value = trim_surrounding_whitespace(raw_value or "")
+  if value == "" then
+    return {}
+  end
+
+  if value:sub(1, 1) == "[" and value:sub(-1) == "]" then
+    local headers = {}
+    local content = trim_surrounding_whitespace(value:sub(2, -2))
+    if content ~= "" then
+      local token = {}
+      local in_double = false
+      local in_single = false
+      local escaped = false
+
+      local function flush_token()
+        local part = trim_surrounding_whitespace(table.concat(token))
+        token = {}
+        if part == "" then
+          return
+        end
+        local item = strip_wrapping_quotes(part)
+        if item ~= "" then
+          headers[#headers + 1] = item
+        end
+      end
+
+      local i = 1
+      while i <= #content do
+        local ch = content:sub(i, i)
+
+        if in_double then
+          token[#token + 1] = ch
+          if escaped then
+            escaped = false
+          elseif ch == "\\" then
+            escaped = true
+          elseif ch == '"' then
+            in_double = false
+          end
+        elseif in_single then
+          token[#token + 1] = ch
+          if ch == "'" then
+            in_single = false
+          end
+        else
+          if ch == "," then
+            flush_token()
+          else
+            token[#token + 1] = ch
+            if ch == '"' then
+              in_double = true
+            elseif ch == "'" then
+              in_single = true
+            end
+          end
+        end
+
+        i = i + 1
+      end
+
+      flush_token()
+    end
+    return headers
+  end
+
+  local single = strip_wrapping_quotes(value)
+  if single == "" then
+    return {}
+  end
+  return { single }
+end
+
 local function load_ai_fix_file_settings()
   local settings = {}
   if not ai_fix_toml_path or ai_fix_toml_path == "" then
@@ -481,7 +700,12 @@ local function load_ai_fix_file_settings()
       if not line:match("^%s*%[") then
         local key, raw_value = line:match("^%s*([%w_%-]+)%s*=%s*(.-)%s*$")
         if key and raw_value then
-          local parsed = parse_ai_toml_setting_value(raw_value)
+          local parsed = nil
+          if key == "custom_headers" then
+            parsed = parse_ai_toml_custom_headers(raw_value)
+          else
+            parsed = parse_ai_toml_setting_value(raw_value)
+          end
           if parsed ~= nil then
             settings[key] = parsed
           end
@@ -528,11 +752,59 @@ local function read_ai_setting(file_key, default_value)
   return value
 end
 
+local function parse_ai_custom_header_entry(raw_header)
+  if type(raw_header) ~= "string" then
+    return nil, nil
+  end
+
+  local trimmed = trim_surrounding_whitespace(raw_header)
+  if trimmed == "" then
+    return nil, nil
+  end
+
+  local colon_at = trimmed:find(":", 1, true)
+  if not colon_at or colon_at <= 1 then
+    return nil, nil
+  end
+
+  local name = trim_surrounding_whitespace(trimmed:sub(1, colon_at - 1))
+  local value = trim_surrounding_whitespace(trimmed:sub(colon_at + 1))
+  if name == "" or value == "" then
+    return nil, nil
+  end
+
+  return name .. ": " .. value, string.lower(name)
+end
+
+local function read_ai_custom_headers(file_key)
+  local raw_headers = ai_fix_file_settings[file_key]
+  if type(raw_headers) ~= "table" then
+    return {}
+  end
+
+  local headers = {}
+  local seen = {
+    ["authorization"] = true,
+    ["content-type"] = true,
+  }
+
+  for _, raw in ipairs(raw_headers) do
+    local parsed, name_key = parse_ai_custom_header_entry(raw)
+    if parsed and name_key and not seen[name_key] then
+      seen[name_key] = true
+      headers[#headers + 1] = parsed
+    end
+  end
+
+  return headers
+end
+
 -- Keep cold startup fast: parse assistant.toml lazily only when AI fix is needed.
 local ai_fix_enabled = true
 local ai_fix_api_base_url = "https://api.vivgrid.com/v1"
 local ai_fix_api_key = nil
 local ai_fix_model = "DeepSeek-V3.2"
+local ai_fix_custom_headers = {}
 local ai_fix_timeout_secs = 12
 local ai_fix_debug_enabled = false
 local ai_fix_state_by_pane = {}
@@ -560,6 +832,7 @@ local function refresh_ai_fix_settings()
   ai_fix_api_base_url = read_ai_setting("base_url", ai_fix_api_base_url)
   ai_fix_api_key = read_ai_setting("api_key", ai_fix_api_key)
   ai_fix_model = read_ai_setting("model", ai_fix_model)
+  ai_fix_custom_headers = read_ai_custom_headers("custom_headers")
 end
 
 local function detect_git_branch(path)
@@ -606,6 +879,22 @@ end
 
 local function ai_fix_endpoint()
   return trim_trailing_whitespace(ai_fix_api_base_url):gsub("/+$", "") .. "/chat/completions"
+end
+
+local function ai_fix_curl_header_args()
+  local args = {
+    "-H",
+    "Authorization: Bearer " .. ai_fix_api_key,
+    "-H",
+    "Content-Type: application/json",
+  }
+
+  for _, header in ipairs(ai_fix_custom_headers) do
+    args[#args + 1] = "-H"
+    args[#args + 1] = header
+  end
+
+  return args
 end
 
 local function encode_ai_fix_payload(model, messages)
@@ -685,19 +974,30 @@ local function start_ai_fix_background_job(payload)
     return nil, "failed to write request payload"
   end
 
+  local curl_header_args = ai_fix_curl_header_args()
+
   local script = [[
 status=0
-curl -sS --fail --connect-timeout "$1" --max-time "$2" "$3" \
-  -H "$4" \
-  -H "$5" \
-  --data-binary "@$6" \
-  -o "$7" \
-  --stderr "$8"
+connect_timeout="$1"
+max_time="$2"
+url="$3"
+request_path="$4"
+response_path="$5"
+stderr_path="$6"
+status_path="$7"
+shift 7
+
+set -- -sS --fail --connect-timeout "$connect_timeout" --max-time "$max_time" "$url" "$@" \
+  --data-binary "@$request_path" \
+  -o "$response_path" \
+  --stderr "$stderr_path"
+
+curl "$@"
 status=$?
-printf '%s' "$status" > "$9"
+printf '%s' "$status" > "$status_path"
 ]]
   local launched_ok, launch_err = pcall(function()
-    wezterm.background_child_process({
+    local launch_args = {
       "sh",
       "-c",
       script,
@@ -705,13 +1005,15 @@ printf '%s' "$status" > "$9"
       "3",
       tostring(ai_fix_timeout_secs),
       ai_fix_endpoint(),
-      "Authorization: Bearer " .. ai_fix_api_key,
-      "Content-Type: application/json",
       job.paths.request_path,
       job.paths.response_path,
       job.paths.stderr_path,
       job.paths.status_path,
-    })
+    }
+    for _, arg in ipairs(curl_header_args) do
+      launch_args[#launch_args + 1] = arg
+    end
+    wezterm.background_child_process(launch_args)
   end)
 
   if not launched_ok then
@@ -1595,7 +1897,7 @@ local KAKU_SURFACE_ACTIVE = '#29263c'
 local KAKU_GREEN = '#61ffca'
 local KAKU_ORANGE = '#ffca85'
 local KAKU_PINK = '#f694ff'
-local KAKU_BLUE = '#5fa8ff'
+local KAKU_BLUE = '#a277ff'
 local KAKU_BRIGHT_BLUE = '#8cc2ff'
 local KAKU_RED = '#ff6767'
 
@@ -1747,6 +2049,31 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
     return
   end
 
+  if name == "kaku_user_typing" then
+    if not pane then
+      return
+    end
+
+    local pane_id_ok, pane_id_value = pcall(function()
+      return pane:pane_id()
+    end)
+    if not pane_id_ok or not pane_id_value then
+      return
+    end
+
+    local pane_id = tostring(pane_id_value)
+    local pane_state = ai_fix_state_by_pane[pane_id]
+    if not pane_state or not pane_state.inflight then
+      return
+    end
+
+    pane_state.inflight = false
+    pane_state.pending_job_id = nil
+    clear_ai_fix_suggestion_state(pane_state)
+    ai_debug_log("user-var-changed user typing cancelled ai fix pane_id=" .. pane_id)
+    return
+  end
+
   if name ~= "kaku_last_exit_code" then
     return
   end
@@ -1869,19 +2196,25 @@ wezterm.on('update-right-status', function(window, pane)
 end)
 
 -- ===== Font =====
--- System default CJK font (PingFang SC on macOS); let the system pick the best match.
+-- Use slightly heavier font weight for light theme to improve readability
+local light_theme = is_light_theme()
+local base_font_weight = light_theme and 'Medium' or 'Regular'
+local bold_font_weight = light_theme and 'DemiBold' or 'Medium'
+
+-- System default CJK font (PingFang SC on macOS); use matching weight for light theme readability.
 config.font = wezterm.font_with_fallback({
-  { family = 'JetBrains Mono', weight = 'Regular' },
-  -- Omit explicit CJK font; macOS selects the best one based on locale.
+  { family = 'JetBrains Mono', weight = base_font_weight },
+  { family = 'PingFang SC', weight = base_font_weight },
   'Apple Color Emoji',
 })
 
 config.font_rules = {
-  -- Prevent thin weight: use Regular instead of Light for Half intensity
+  -- Prevent thin weight: use base weight instead of Light for Half intensity
   {
     intensity = 'Half',
     font = wezterm.font_with_fallback({
-      { family = 'JetBrains Mono', weight = 'Regular' },
+      { family = 'JetBrains Mono', weight = base_font_weight },
+      { family = 'PingFang SC', weight = base_font_weight },
     }),
   },
   -- Normal italic: disable real italics (keep upright)
@@ -1889,62 +2222,35 @@ config.font_rules = {
     intensity = 'Normal',
     italic = true,
     font = wezterm.font_with_fallback({
-      { family = 'JetBrains Mono', weight = 'Regular', italic = false },
+      { family = 'JetBrains Mono', weight = base_font_weight, italic = false },
+      { family = 'PingFang SC', weight = base_font_weight },
     }),
   },
-  -- Bold: use Medium weight instead of Heavy
+  -- Bold: use heavier weight
   {
     intensity = 'Bold',
     font = wezterm.font_with_fallback({
-      { family = 'JetBrains Mono', weight = 'Medium' },
+      { family = 'JetBrains Mono', weight = bold_font_weight },
+      { family = 'PingFang SC', weight = bold_font_weight },
     }),
   },
 }
 
 config.bold_brightens_ansi_colors = false
-local function main_screen_is_builtin(screen)
-  local name = string.lower(tostring(screen.name or ''))
-  if name == 'color lcd' then
-    return true
-  end
-  if string.find(name, 'built-in', 1, true) then
-    return true
-  end
-  if string.find(name, 'built in', 1, true) then
-    return true
-  end
-  if string.find(name, '内建', 1, true) then
-    return true
-  end
-  return false
-end
 
 -- Auto-adjust font size using main-screen pixel size.
--- Built-in 13-inch class displays use 15px.
--- High-resolution displays use 17px.
+-- low-resolution screens use 15px.
+-- high-resolution screens use 17px.
 local function get_font_size()
+  if low_resolution_screen then
+    return 15.0
+  end
+
   local success, screens = pcall(function()
     return wezterm.gui.screens()
   end)
   if success and screens and screens.main then
     local main = screens.main
-    local width = tonumber(main.width or 0) or 0
-    local height = tonumber(main.height or 0) or 0
-    local short_edge = math.min(width, height)
-    local is_builtin = main_screen_is_builtin(main)
-    if short_edge > 0 then
-      if is_builtin then
-        if short_edge <= 1700 then
-          return 15.0
-        end
-        return 17.0
-      end
-      if short_edge < 1800 then
-        return 15.0
-      end
-      return 17.0
-    end
-
     -- Fallback when pixel dimensions are unavailable.
     local dpi = tonumber(main.effective_dpi or 72) or 72
     if dpi < 110 then
@@ -1963,10 +2269,10 @@ config.use_cap_height_to_scale_fallback_fonts = false
 config.custom_block_glyphs = true
 config.unicode_version = 14
 
-local _, in_app_bundle = wezterm.executable_dir:gsub('MacOS/?$', 'Resources')
-if in_app_bundle > 0 then
-  config.term = 'kaku'
-end
+-- Do NOT set config.term = 'kaku' here.
+-- Remote servers lack the 'kaku' terminfo entry, causing SSH issues like
+-- broken backspace/delete keys. Let the default 'xterm-256color' apply.
+-- See: https://github.com/tw93/Kaku/issues/130
 
 -- ===== Cursor =====
 config.default_cursor_style = 'BlinkingBar'
@@ -1983,24 +2289,14 @@ config.scrollback_lines = 10000
 config.selection_word_boundary = ' \t\n{}[]()"\'-'  -- Smart selection boundaries
 
 -- ===== Window =====
-config.window_padding = {
-  left = '40px',
-  right = '40px',
-  top = '70px',
-  bottom = '20px',
-}
+config.window_padding = get_default_padding()
 config.use_resize_increments = true
 
 config.initial_cols = 110
 config.initial_rows = 22
--- Mitigate high GPU usage on macOS 26.x by disabling window shadow.
-config.window_decorations = "INTEGRATED_BUTTONS|RESIZE|MACOS_FORCE_DISABLE_SHADOW"
-config.window_frame = {
-  font = wezterm.font({ family = 'JetBrains Mono', weight = 'Regular' }),
-  font_size = 13.0,
-  active_titlebar_bg = KAKU_BLACK,
-  inactive_titlebar_bg = KAKU_BLACK,
-}
+-- Keep native macOS window shadow by default.
+config.window_decorations = "INTEGRATED_BUTTONS|RESIZE"
+-- Window frame colors will be set after color_scheme is determined
 
 config.window_close_confirmation = 'NeverPrompt'
 config.window_background_opacity = 1.0
@@ -2094,11 +2390,116 @@ local kaku_theme = {
   },
 }
 
+-- ===== Kaku Light Theme =====
+local kaku_light = {
+  foreground = '#100F0F',
+  background = '#FFFCF0',
+
+  cursor_bg = '#343331',
+  cursor_fg = '#FFFCF0',
+  cursor_border = '#343331',
+
+  selection_bg = '#E8E6DB',
+  selection_fg = '#100F0F',
+
+  ansi = {
+    '#100F0F', -- black
+    '#AF3029', -- red
+    '#4D7A23', -- green (darker for better contrast)
+    '#9D7800', -- yellow
+    '#2058A0', -- blue (for directory names)
+    '#8B2660', -- magenta (slightly darker)
+    '#0D6258', -- cyan (darker for light bg)
+    '#878580', -- white (Flexoki tx-2, good contrast)
+  },
+
+  brights = {
+    '#B7B5AC', -- bright black (comments, softer gray)
+    '#D14D41', -- bright red
+    '#879A39', -- bright green
+    '#DAA520', -- bright yellow
+    '#4385BE', -- bright blue
+    '#CE5D97', -- bright magenta
+    '#3AA99F', -- bright cyan
+    '#6F6E69', -- bright white (Flexoki tx-3)
+  },
+
+  split = '#B8B7AD',
+
+  -- Override 256-color grayscale ramp (232-255) for light theme
+  -- Dark grays become light grays so quote blocks look natural
+  indexed = {
+    [232] = '#F2F0E5', [233] = '#ECEADF', [234] = '#E6E4D9', [235] = '#E0DED3',
+    [236] = '#DAD8CD', [237] = '#D4D2C7', [238] = '#CECCC1', [239] = '#C8C6BB',
+    [240] = '#C2C0B5', [241] = '#BCBAAF', [242] = '#B6B4A9', [243] = '#B0AEA3',
+    [244] = '#AAA89D', [245] = '#A4A297', [246] = '#9E9C91', [247] = '#98968B',
+    [248] = '#929085', [249] = '#8C8A7F', [250] = '#868479', [251] = '#807E73',
+    [252] = '#7A786D', [253] = '#747267', [254] = '#6E6C61', [255] = '#68665B',
+  },
+
+  tab_bar = {
+    background = '#FFFCF0',
+    inactive_tab_edge = '#FFFCF0',
+
+    active_tab = {
+      bg_color = '#E8E6DB',
+      fg_color = '#100F0F',
+      intensity = 'Bold',
+      underline = 'None',
+      italic = false,
+      strikethrough = false,
+    },
+
+    inactive_tab = {
+      bg_color = '#FFFCF0',
+      fg_color = '#4A4946',
+      intensity = 'Normal',
+    },
+
+    inactive_tab_hover = {
+      bg_color = '#E8E6DB',
+      fg_color = '#100F0F',
+      italic = false,
+    },
+
+    new_tab = {
+      bg_color = '#FFFCF0',
+      fg_color = '#4A4946',
+    },
+
+    new_tab_hover = {
+      bg_color = '#E8E6DB',
+      fg_color = '#100F0F',
+    },
+  },
+}
+
 config.color_schemes = config.color_schemes or {}
+config.color_schemes['Kaku Dark'] = kaku_theme
+config.color_schemes['Kaku Light'] = kaku_light
+-- Legacy alias for compatibility
 config.color_schemes['Kaku Theme'] = kaku_theme
 if not config.color_scheme then
-  config.color_scheme = 'Kaku Theme'
+  config.color_scheme = 'Kaku Dark'
 end
+
+-- ===== Window Frame (theme-aware) =====
+local function get_window_frame_colors()
+  local scheme = config.color_scheme or 'Kaku Dark'
+  if scheme == 'Kaku Light' then
+    return '#FFFCF0', '#FFFCF0'
+  else
+    return KAKU_BLACK, KAKU_BLACK
+  end
+end
+
+local active_titlebar_bg, inactive_titlebar_bg = get_window_frame_colors()
+config.window_frame = {
+  font = wezterm.font({ family = 'JetBrains Mono', weight = 'Regular' }),
+  font_size = 13.0,
+  active_titlebar_bg = active_titlebar_bg,
+  inactive_titlebar_bg = inactive_titlebar_bg,
+}
 
 -- ===== Shell =====
 local user_shell = os.getenv('SHELL')
@@ -2481,7 +2882,7 @@ wezterm.on('gui-startup', function(cmd)
   runtime_cwd_warmup_until_secs = now_secs() + runtime_cwd_startup_grace_secs
 
   local home = os.getenv("HOME")
-  local current_version = 11  -- Update this when config changes
+  local current_version = 12  -- Update this when config changes
 
   local state_file = home .. "/.config/kaku/state.json"
   local is_first_run = false

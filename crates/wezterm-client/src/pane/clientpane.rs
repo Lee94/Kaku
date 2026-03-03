@@ -9,7 +9,7 @@ use config::keyassignment::ScrollbackEraseMode;
 use mux::domain::DomainId;
 use mux::pane::{
     alloc_pane_id, CachePolicy, CloseReason, ForEachPaneLogicalLine, LogicalLine, Pane, PaneId,
-    Pattern, SearchResult, WithPaneLines,
+    PaneReader, Pattern, SearchResult, WithPaneLines,
 };
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::TabId;
@@ -353,7 +353,7 @@ impl Pane for ClientPane {
         Ok(())
     }
 
-    fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+    fn reader(&self) -> anyhow::Result<Option<PaneReader>> {
         Ok(None)
     }
 

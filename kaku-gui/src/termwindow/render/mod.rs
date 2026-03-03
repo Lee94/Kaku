@@ -344,11 +344,6 @@ impl crate::TermWindow {
             pixel_max: self.terminal_size.pixel_width as f32,
             pixel_cell: self.render_metrics.cell_size.width as f32,
         };
-        let v_context = DimensionContext {
-            dpi: self.dimensions.dpi as f32,
-            pixel_max: self.terminal_size.pixel_height as f32,
-            pixel_cell: self.render_metrics.cell_size.height as f32,
-        };
 
         let padding_left = self
             .config
@@ -356,12 +351,14 @@ impl crate::TermWindow {
             .left
             .evaluate_as_pixels(h_context);
         let padding_right = self.config.window_padding.right;
-        let padding_top = self.config.window_padding.top.evaluate_as_pixels(v_context);
-        let padding_bottom = self
-            .config
-            .window_padding
-            .bottom
-            .evaluate_as_pixels(v_context);
+        let tab_bar_height = if self.show_tab_bar {
+            self.tab_bar_pixel_height().unwrap_or(0.) as usize
+        } else {
+            0
+        };
+        let (padding_top, padding_bottom) = self.effective_vertical_padding();
+        let padding_top = padding_top as f32;
+        let padding_bottom = padding_bottom as f32;
 
         let horizontal_gap = self.dimensions.pixel_width as f32
             - self.terminal_size.pixel_width as f32
@@ -376,7 +373,7 @@ impl crate::TermWindow {
             - padding_top
             - padding_bottom
             - if self.show_tab_bar {
-                self.tab_bar_pixel_height().unwrap_or(0.)
+                tab_bar_height as f32
             } else {
                 0.
             };

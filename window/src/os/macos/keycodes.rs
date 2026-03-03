@@ -126,10 +126,16 @@ fn build_map() -> HashMap<u16, PhysKeyCode> {
 
 lazy_static::lazy_static! {
     static ref MAP: HashMap<u16, PhysKeyCode> = build_map();
+    static ref REVERSE_MAP: HashMap<PhysKeyCode, u16> =
+        MAP.iter().map(|(vkey, phys)| (*phys, *vkey)).collect();
 }
 
 pub fn vkey_to_phys(vkey: u16) -> Option<PhysKeyCode> {
     MAP.get(&vkey).copied()
+}
+
+pub fn phys_to_vkey(phys: PhysKeyCode) -> Option<u16> {
+    REVERSE_MAP.get(&phys).copied()
 }
 
 pub const kVK_ANSI_A: u16 = 0x00;

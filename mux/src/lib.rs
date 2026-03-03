@@ -1,5 +1,5 @@
 use crate::client::{ClientId, ClientInfo};
-use crate::pane::{CachePolicy, Pane, PaneId};
+use crate::pane::{CachePolicy, Pane, PaneId, PaneReader};
 use crate::pane_encoding::{decode_bytes_to_string, PaneOutputDecoder};
 use crate::ssh_agent::AgentProxy;
 use crate::tab::{SplitRequest, Tab, TabId};
@@ -8,7 +8,9 @@ use anyhow::{anyhow, Context, Error};
 use config::keyassignment::{PaneEncoding, SpawnTabDomain};
 use config::{configuration, ExitBehavior, GuiPosition};
 use domain::{Domain, DomainId, DomainState, SplitSource};
-use filedescriptor::{poll, pollfd, socketpair, AsRawSocketDescriptor, FileDescriptor, POLLIN};
+use filedescriptor::{
+    poll, pollfd, socketpair, AsRawSocketDescriptor, FileDescriptor, POLLHUP, POLLIN,
+};
 #[cfg(unix)]
 use libc::{c_int, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
 use log::error;
@@ -73,7 +75,7 @@ pub enum MuxNotification {
     AssignClipboard {
         pane_id: PaneId,
         selection: ClipboardSelection,
-        clipboard: Option<String>,
+        clipboard: Option<Arc<str>>,
     },
     SaveToDownloads {
         name: Option<String>,
@@ -115,9 +117,13 @@ pub struct Mux {
     num_panes_by_workspace: RwLock<HashMap<String, usize>>,
     main_thread_id: std::thread::ThreadId,
     agent: Option<AgentProxy>,
+    /// Dead flags for pane reader threads, used to signal thread termination
+    pane_dead_flags: RwLock<HashMap<PaneId, Arc<AtomicBool>>>,
 }
 
-const BUFSIZE: usize = 1024 * 1024;
+// Reduced from 1MB to 256KB to lower per-pane memory overhead.
+// This affects read buffer and socketpair kernel buffers.
+const BUFSIZE: usize = 256 * 1024;
 
 /// This function applies parsed actions to the pane and notifies any
 /// mux subscribers about the output event
@@ -133,7 +139,7 @@ fn send_actions_to_mux(pane: &Weak<dyn Pane>, dead: &Arc<AtomicBool>, actions: V
             // Something else removed the pane from
             // the mux, so signal that we should stop
             // trying to process it in read_from_pane_pty.
-            dead.store(true, Ordering::Relaxed);
+            dead.store(true, Ordering::Release);
         }
     }
     histogram!("send_actions_to_mux.rate").record(1.);
@@ -149,13 +155,43 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
     let mut deadline = None;
 
     loop {
-        match rx.read(&mut buf) {
-            Ok(size) if size == 0 => {
-                dead.store(true, Ordering::Relaxed);
+        // Check dead flag at the start of each iteration
+        if dead.load(Ordering::Acquire) {
+            log::trace!("parse_buffered_data: dead flag set, exiting");
+            break;
+        }
+
+        // Use poll with 200ms timeout to balance CPU overhead and close responsiveness.
+        // POLLHUP will wake us immediately when writer closes.
+        let mut pfd = [pollfd {
+            fd: rx.as_socket_descriptor(),
+            events: POLLIN,
+            revents: 0,
+        }];
+        match poll(&mut pfd, Some(Duration::from_millis(200))) {
+            Ok(0) => {
+                // Timeout, loop back to check dead flag
+                continue;
+            }
+            Ok(_) if pfd[0].revents & POLLIN == 0 => {
+                // No data available (POLLHUP, POLLERR, etc.)
                 break;
             }
             Err(_) => {
-                dead.store(true, Ordering::Relaxed);
+                break;
+            }
+            Ok(_) => {
+                // Data available, proceed to read
+            }
+        }
+
+        match rx.read(&mut buf) {
+            Ok(size) if size == 0 => {
+                dead.store(true, Ordering::Release);
+                break;
+            }
+            Err(_) => {
+                dead.store(true, Ordering::Release);
                 break;
             }
             Ok(size) => {
@@ -281,14 +317,15 @@ fn allocate_socketpair() -> anyhow::Result<(FileDescriptor, FileDescriptor)> {
 fn read_from_pane_pty(
     pane: Weak<dyn Pane>,
     banner: Option<String>,
-    mut reader: Box<dyn std::io::Read>,
+    pane_reader: PaneReader,
+    dead: Arc<AtomicBool>,
 ) {
+    let mut reader = pane_reader.reader;
+    #[cfg(unix)]
+    let reader_fd = pane_reader.fd;
+
     let mut buf = vec![0; BUFSIZE];
     let mut decoder = PaneOutputDecoder::default();
-
-    // This is used to signal that an error occurred either in this thread,
-    // or in the main mux thread.  If `true`, this thread will terminate.
-    let dead = Arc::new(AtomicBool::new(false));
 
     let (pane_id, exit_behavior) = match pane.upgrade() {
         Some(pane) => (pane.pane_id(), pane.exit_behavior()),
@@ -311,7 +348,7 @@ fn read_from_pane_pty(
     };
 
     let parse_pane = pane.clone();
-    std::thread::spawn({
+    let parse_handle = std::thread::spawn({
         let dead = Arc::clone(&dead);
         move || parse_buffered_data(parse_pane, &dead, rx)
     });
@@ -322,7 +359,43 @@ fn read_from_pane_pty(
         }
     }
 
-    while !dead.load(Ordering::Relaxed) {
+    // Poll timeout in milliseconds. Using 200ms as a balance between
+    // responsiveness when closing panes and CPU overhead.
+    const POLL_TIMEOUT_MS: u64 = 200;
+
+    loop {
+        if dead.load(Ordering::Acquire) {
+            log::trace!("read_pty: dead flag set for pane {}", pane_id);
+            break;
+        }
+
+        // On Unix, poll before read to avoid blocking indefinitely.
+        // This allows the dead flag check to happen even if no data arrives.
+        // Note: Non-Unix platforms will block on read(); acceptable for macOS-only Kaku.
+        #[cfg(unix)]
+        if let Some(fd) = reader_fd {
+            let mut pfd = [pollfd {
+                fd,
+                events: POLLIN,
+                revents: 0,
+            }];
+            match poll(&mut pfd, Some(Duration::from_millis(POLL_TIMEOUT_MS))) {
+                Ok(0) => continue, // Timeout, check dead flag
+                Ok(_) if pfd[0].revents & POLLIN != 0 => {
+                    // Data available (possibly with POLLHUP), read it first
+                }
+                Ok(_) if pfd[0].revents & POLLHUP != 0 => {
+                    log::trace!("read_pty POLLHUP: pane_id {}", pane_id);
+                    break;
+                }
+                Err(e) => {
+                    error!("read_pty poll failed: pane {} {:?}", pane_id, e);
+                    break;
+                }
+                Ok(_) => continue, // No data and no hangup, check dead flag
+            }
+        }
+
         match reader.read(&mut buf) {
             Ok(size) if size == 0 => {
                 log::trace!("read_pty EOF: pane_id {}", pane_id);
@@ -371,7 +444,13 @@ fn read_from_pane_pty(
         }
     }
 
-    dead.store(true, Ordering::Relaxed);
+    dead.store(true, Ordering::Release);
+
+    // Close the write end to signal EOF to parse thread, then wait for it
+    drop(tx);
+    if let Err(e) = parse_handle.join() {
+        log::warn!("parse_buffered_data thread panicked: {:?}", e);
+    }
 }
 
 lazy_static::lazy_static! {
@@ -459,6 +538,7 @@ impl Mux {
             num_panes_by_workspace: RwLock::new(HashMap::new()),
             main_thread_id: std::thread::current().id(),
             agent,
+            pane_dead_flags: RwLock::new(HashMap::new()),
         }
     }
 
@@ -799,8 +879,13 @@ impl Mux {
         let pane_id = pane.pane_id();
         if let Some(reader) = pane.reader()? {
             let banner = self.banner.read().clone();
-            let pane = Arc::downgrade(pane);
-            thread::spawn(move || read_from_pane_pty(pane, banner, reader));
+            let pane_weak = Arc::downgrade(pane);
+            // Create dead flag for this pane's reader threads and store it
+            let dead = Arc::new(AtomicBool::new(false));
+            self.pane_dead_flags
+                .write()
+                .insert(pane_id, Arc::clone(&dead));
+            thread::spawn(move || read_from_pane_pty(pane_weak, banner, reader, dead));
         }
         self.recompute_pane_count();
         self.notify(MuxNotification::PaneAdded(pane_id));
@@ -823,6 +908,14 @@ impl Mux {
     fn remove_pane_internal(&self, pane_id: PaneId) {
         log::debug!("removing pane {}", pane_id);
         let mut changed = false;
+
+        // Signal the pane's reader threads to terminate via dead flag.
+        // Threads will exit on their own when they check the flag.
+        if let Some(dead) = self.pane_dead_flags.write().remove(&pane_id) {
+            log::debug!("setting dead flag for pane {} reader threads", pane_id);
+            dead.store(true, Ordering::Release);
+        }
+
         if let Some(pane) = self.panes.write().remove(&pane_id).clone() {
             log::debug!("killing pane {}", pane_id);
             pane.kill();
@@ -1482,7 +1575,7 @@ impl Clipboard for MuxClipboard {
         mux.notify(MuxNotification::AssignClipboard {
             pane_id: self.pane_id,
             selection,
-            clipboard,
+            clipboard: clipboard.map(|s| Arc::from(s.as_str())),
         });
         Ok(())
     }

@@ -12,7 +12,7 @@ NC='\033[0m'
 OPENCODE_DIR="$HOME/.config/opencode"
 THEMES_DIR="$OPENCODE_DIR/themes"
 CONFIG_FILE="$OPENCODE_DIR/opencode.json"
-THEME_FILE="$THEMES_DIR/wezterm-match.json"
+THEME_FILE="$THEMES_DIR/kaku-match.json"
 
 echo -e "${BOLD}OpenCode Theme Setup${NC}"
 echo -e "${NC}Kaku-matching color palette for OpenCode${NC}"
@@ -118,7 +118,7 @@ try:
         cfg = json.load(f)
 except (json.JSONDecodeError, FileNotFoundError):
     cfg = {}
-cfg['theme'] = 'wezterm-match'
+cfg['theme'] = 'kaku-match'
 with open('$TMPFILE', 'w') as f:
     json.dump(cfg, f, indent=2)
 " && mv "$TMPFILE" "$CONFIG_FILE"
@@ -127,14 +127,14 @@ with open('$TMPFILE', 'w') as f:
         rm -f "$TMPFILE"
         cat > "$CONFIG_FILE" << 'CONFIG_EOF'
 {
-  "theme": "wezterm-match"
+  "theme": "kaku-match"
 }
 CONFIG_EOF
     fi
 else
     cat > "$CONFIG_FILE" << 'CONFIG_EOF'
 {
-  "theme": "wezterm-match"
+  "theme": "kaku-match"
 }
 CONFIG_EOF
 fi

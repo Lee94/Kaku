@@ -7,8 +7,8 @@ use config::keyassignment::{
 };
 use mux::domain::DomainId;
 use mux::pane::{
-    CachePolicy, ForEachPaneLogicalLine, LogicalLine, Pane, PaneId, Pattern, PatternType,
-    PerformAssignmentResult, SearchResult, WithPaneLines,
+    CachePolicy, ForEachPaneLogicalLine, LogicalLine, Pane, PaneId, PaneReader, Pattern,
+    PatternType, PerformAssignmentResult, SearchResult, WithPaneLines,
 };
 use mux::renderable::*;
 use mux::tab::TabId;
@@ -35,6 +35,9 @@ use window::{KeyCode as WKeyCode, Modifiers, WindowOps};
 lazy_static::lazy_static! {
     static ref SAVED_PATTERN: Mutex<HashMap<TabId, Pattern>> = Mutex::new(HashMap::new());
 }
+
+// Limit SAVED_PATTERN entries to avoid unbounded growth when tabs are repeatedly opened/closed.
+const MAX_SAVED_PATTERNS: usize = 64;
 
 const SEARCH_CHUNK_SIZE: StableRowIndex = 1000;
 
@@ -312,7 +315,14 @@ impl CopyRenderable {
         self.by_line.clear();
         self.result_pos.take();
 
-        SAVED_PATTERN.lock().insert(self.tab_id, self.get_pattern());
+        {
+            let mut patterns = SAVED_PATTERN.lock();
+            // Prune if exceeding limit to avoid unbounded growth
+            if patterns.len() >= MAX_SAVED_PATTERNS {
+                patterns.clear();
+            }
+            patterns.insert(self.tab_id, self.get_pattern());
+        }
 
         let bar_pos = self.compute_search_row();
         self.dirty_results.add(bar_pos);
@@ -1197,7 +1207,7 @@ impl Pane for CopyOverlay {
         Ok(())
     }
 
-    fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+    fn reader(&self) -> anyhow::Result<Option<PaneReader>> {
         Ok(None)
     }
 
