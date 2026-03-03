@@ -217,29 +217,6 @@ local function is_low_resolution_screen()
   return false
 end
 
-local function is_light_theme()
-  -- Check user config for color_scheme setting
-  local user_config_path = kaku_user_config_path()
-  if not user_config_path then
-    return false
-  end
-  local file = io.open(user_config_path, 'r')
-  if not file then
-    return false
-  end
-  for line in file:lines() do
-    local trimmed = line:match('^%s*(.-)%s*$')
-    if trimmed and not trimmed:match('^%-%-') then
-      if trimmed:match("^config%.color_scheme%s*=%s*['\"]Kaku Light['\"]") then
-        file:close()
-        return true
-      end
-    end
-  end
-  file:close()
-  return false
-end
-
 -- Compute once; all spacing helpers below share this result.
 local low_resolution_screen = is_low_resolution_screen()
 
@@ -2200,25 +2177,19 @@ wezterm.on('update-right-status', function(window, pane)
 end)
 
 -- ===== Font =====
--- Use slightly heavier font weight for light theme to improve readability
-local light_theme = is_light_theme()
-local base_font_weight = light_theme and 'Medium' or 'Regular'
-local bold_font_weight = light_theme and 'DemiBold' or 'Medium'
-
--- System default CJK font (PingFang SC on macOS); use matching weight for light theme readability.
 config.font = wezterm.font_with_fallback({
-  { family = 'JetBrains Mono', weight = base_font_weight },
-  { family = 'PingFang SC', weight = base_font_weight },
+  { family = 'JetBrains Mono', weight = 'Regular' },
+  { family = 'PingFang SC', weight = 'Regular' },
   'Apple Color Emoji',
 })
 
 config.font_rules = {
-  -- Prevent thin weight: use base weight instead of Light for Half intensity
+  -- Prevent thin weight: use Regular instead of Light for Half intensity
   {
     intensity = 'Half',
     font = wezterm.font_with_fallback({
-      { family = 'JetBrains Mono', weight = base_font_weight },
-      { family = 'PingFang SC', weight = base_font_weight },
+      { family = 'JetBrains Mono', weight = 'Regular' },
+      { family = 'PingFang SC', weight = 'Regular' },
     }),
   },
   -- Normal italic: disable real italics (keep upright)
@@ -2226,16 +2197,16 @@ config.font_rules = {
     intensity = 'Normal',
     italic = true,
     font = wezterm.font_with_fallback({
-      { family = 'JetBrains Mono', weight = base_font_weight, italic = false },
-      { family = 'PingFang SC', weight = base_font_weight },
+      { family = 'JetBrains Mono', weight = 'Regular', italic = false },
+      { family = 'PingFang SC', weight = 'Regular' },
     }),
   },
-  -- Bold: use heavier weight
+  -- Bold: use Medium weight
   {
     intensity = 'Bold',
     font = wezterm.font_with_fallback({
-      { family = 'JetBrains Mono', weight = bold_font_weight },
-      { family = 'PingFang SC', weight = bold_font_weight },
+      { family = 'JetBrains Mono', weight = 'Medium' },
+      { family = 'PingFang SC', weight = 'Medium' },
     }),
   },
 }
