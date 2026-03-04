@@ -16,13 +16,15 @@ jobs:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: 1.93.0
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
       - name: Import signing certificate
         if: env.KAKU_SIGNING_IDENTITY != ''
@@ -72,7 +74,7 @@ jobs:
           spctl -a -vv dist/Kaku.app
 
       - name: Upload to Release
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b # v1
         with:
           allowUpdates: true
           artifacts: "dist/*.dmg,dist/kaku_for_update.zip,dist/kaku_for_update.zip.sha256"
@@ -99,7 +101,7 @@ jobs:
 
       - name: Dispatch tap bump
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:
           token: ${{ env.HOMEBREW_TAP_TOKEN }}
           repository: tw93/homebrew-tap

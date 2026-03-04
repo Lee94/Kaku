@@ -5,15 +5,15 @@ all: build
 RUST_LOG ?= info
 
 test:
-	cargo nextest run -E 'not test(shapecache::test::ligatures_jetbrains)'
-	cargo nextest run -p wezterm-escape-parser # no_std by default
+	cargo nextest run --locked -E 'not test(shapecache::test::ligatures_jetbrains)'
+	cargo nextest run --locked -p wezterm-escape-parser # no_std by default
 
 check:
-	cargo check
-	cargo check -p wezterm-escape-parser
-	cargo check -p wezterm-cell
-	cargo check -p wezterm-surface
-	cargo check -p wezterm-ssh
+	cargo check --locked
+	cargo check --locked -p wezterm-escape-parser
+	cargo check --locked -p wezterm-cell
+	cargo check --locked -p wezterm-surface
+	cargo check --locked -p wezterm-ssh
 
 app:
 	PROFILE=debug ./scripts/build.sh --app-only
@@ -38,7 +38,7 @@ dev:
 		-x "run $(BUILD_OPTS) -p kaku-gui --"
 
 build:
-	cargo build $(BUILD_OPTS) -p kaku -p kaku-gui -p wezterm-mux-server-impl
+	cargo build --locked $(BUILD_OPTS) -p kaku -p kaku-gui -p wezterm-mux-server-impl
 
 fmt:
 	cargo +nightly fmt -p kaku -p kaku-gui -p mux -p wezterm-term -p termwiz -p config -p wezterm-font

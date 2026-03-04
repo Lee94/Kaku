@@ -21,14 +21,15 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Rust (nightly)
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@0f1b44df7e9cbb178d781a242338dfa5e243ad7f # nightly
         with:
+          toolchain: nightly
           components: rustfmt
 
       - name: Run formatter
@@ -58,21 +59,23 @@ jobs:
     needs: fmt
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: 1.93.0
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@f092c064826410a38929a5791d2c0225b94432fe # nextest
 
       - name: Run tests
         run: |
-          cargo nextest run -E 'not test(shapecache::test::ligatures_jetbrains)'
-          cargo nextest run -p wezterm-escape-parser
+          cargo nextest run --locked -E 'not test(shapecache::test::ligatures_jetbrains)'
+          cargo nextest run --locked -p wezterm-escape-parser
 
       - name: Shell integration smoke tests
         run: |
@@ -85,13 +88,15 @@ jobs:
     needs: fmt
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: 1.93.0
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
       - name: Guard silent write flush ok
         run: |
@@ -101,7 +106,7 @@ jobs:
           fi
 
       - name: Check key crates
-        run: cargo check -p kaku -p kaku-gui
+        run: cargo check --locked -p kaku -p kaku-gui
 
   universal-build:
     name: Universal Build Validation
@@ -109,21 +114,22 @@ jobs:
     needs: [check, test]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
+          toolchain: 1.93.0
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
       - name: Build both targets
         run: |
           set -o pipefail
-          cargo build --release --target aarch64-apple-darwin -p kaku -p kaku-gui 2>&1 | sed '/has no symbols/d'
-          cargo build --release --target x86_64-apple-darwin -p kaku -p kaku-gui 2>&1 | sed '/has no symbols/d'
+          cargo build --locked --release --target aarch64-apple-darwin -p kaku -p kaku-gui 2>&1 | sed '/has no symbols/d'
+          cargo build --locked --release --target x86_64-apple-darwin -p kaku -p kaku-gui 2>&1 | sed '/has no symbols/d'
 
       - name: Lipo merge and verify
         run: |
