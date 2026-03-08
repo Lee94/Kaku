@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -90,7 +91,7 @@ const FACTORY_DROID_DEFAULT_AUTONOMY: &str = "normal";
 const FACTORY_DROID_REASONING_OPTIONS: [&str; 5] = ["off", "none", "low", "medium", "high"];
 const FACTORY_DROID_AUTONOMY_OPTIONS: [&str; 5] =
     ["normal", "spec", "auto-low", "auto-medium", "auto-high"];
-const CODEX_USAGE_CACHE_TTL: Duration = Duration::from_secs(120);
+const USAGE_CACHE_TTL: Duration = Duration::from_secs(120);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const UI_STATUS_TTL: Duration = Duration::from_secs(3);
 const UI_ERROR_TTL: Duration = Duration::from_secs(5);
@@ -153,7 +154,11 @@ struct ToolState {
 }
 
 impl ToolState {
-    fn load(tool: Tool) -> Self {
+    fn load_without_remote_usage(tool: Tool) -> Self {
+        Self::load_with_usage(tool, false)
+    }
+
+    fn load_with_usage(tool: Tool, eager_remote_usage: bool) -> Self {
         let path = if tool == Tool::KakuAssistant {
             match assistant_config::ensure_assistant_toml_exists() {
                 Ok(path) => path,
@@ -212,12 +217,16 @@ impl ToolState {
                 let parsed = parse_json_or_jsonc_with_debug(&raw, tool.label());
                 (
                     extract_claude_code_fields(&parsed),
-                    load_claude_usage_snapshot().and_then(|snapshot| snapshot.summary),
+                    eager_remote_usage
+                        .then(|| load_claude_usage_snapshot().and_then(|snapshot| snapshot.summary))
+                        .flatten(),
                 )
             }
             Tool::Codex => (
                 extract_codex_fields(&raw),
-                load_codex_usage_snapshot().and_then(|snapshot| snapshot.summary),
+                eager_remote_usage
+                    .then(|| load_codex_usage_snapshot().and_then(|snapshot| snapshot.summary))
+                    .flatten(),
             ),
             Tool::Gemini => {
                 let parsed = parse_json_with_debug(&raw, tool.label());
@@ -230,7 +239,11 @@ impl ToolState {
                 let parsed = parse_json_with_debug(&raw, tool.label());
                 (
                     extract_copilot_fields(&parsed),
-                    load_copilot_usage_snapshot().and_then(|snapshot| snapshot.summary),
+                    eager_remote_usage
+                        .then(|| {
+                            load_copilot_usage_snapshot().and_then(|snapshot| snapshot.summary)
+                        })
+                        .flatten(),
                 )
             }
             Tool::FactoryDroid => {
@@ -243,7 +256,11 @@ impl ToolState {
             }
         };
 
-        let summary = summarize_tool_fields(tool, true, &fields, usage_summary.as_deref());
+        let summary = if !eager_remote_usage && supports_remote_usage(tool) {
+            Some("Loading usage...".into())
+        } else {
+            summarize_tool_fields(tool, true, &fields, usage_summary.as_deref())
+        };
 
         ToolState {
             tool,
@@ -347,6 +364,12 @@ struct CopilotUsageSnapshot {
     summary: Option<String>,
 }
 
+#[derive(Clone)]
+struct UsageSummaryUpdate {
+    tool: Tool,
+    summary: Option<String>,
+}
+
 fn codex_usage_cache_path() -> PathBuf {
     config::HOME_DIR
         .join(".cache")
@@ -433,6 +456,19 @@ fn format_reset_time_from_iso(reset_at: &str) -> Option<String> {
     format_duration_short((reset_at - Utc::now()).num_seconds())
 }
 
+fn supports_remote_usage(tool: Tool) -> bool {
+    matches!(tool, Tool::ClaudeCode | Tool::Codex | Tool::Copilot)
+}
+
+fn load_usage_summary(tool: Tool) -> Option<String> {
+    match tool {
+        Tool::ClaudeCode => load_claude_usage_snapshot().and_then(|snapshot| snapshot.summary),
+        Tool::Codex => load_codex_usage_snapshot().and_then(|snapshot| snapshot.summary),
+        Tool::Copilot => load_copilot_usage_snapshot().and_then(|snapshot| snapshot.summary),
+        _ => None,
+    }
+}
+
 fn format_percent_value(percent: f64) -> String {
     if (percent.fract()).abs() < 0.05 {
         format!("{percent:.0}%")
@@ -494,11 +530,8 @@ fn parse_codex_usage_snapshot(data: &serde_json::Value) -> Option<CodexUsageSnap
         (None, None) => None,
     };
 
-    if summary.is_none() {
-        None
-    } else {
-        Some(CodexUsageSnapshot { summary })
-    }
+    summary.as_ref()?;
+    Some(CodexUsageSnapshot { summary })
 }
 
 fn codex_usage_cache_is_fresh(path: &Path) -> bool {
@@ -506,7 +539,7 @@ fn codex_usage_cache_is_fresh(path: &Path) -> bool {
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|elapsed| elapsed < CODEX_USAGE_CACHE_TTL)
+        .is_some_and(|elapsed| elapsed < USAGE_CACHE_TTL)
 }
 
 fn load_codex_usage_json_from_cache(path: &Path) -> Option<serde_json::Value> {
@@ -532,6 +565,8 @@ fn write_json_cache(path: &Path, value: &serde_json::Value) {
 }
 
 fn run_curl(args: &[&str]) -> Option<serde_json::Value> {
+    // Request headers are passed via argv for portability, which means short-lived
+    // tokens may be visible to local process inspectors such as `ps` while curl runs.
     let output = std::process::Command::new(OsStr::new("/usr/bin/curl"))
         .args(args)
         .output()
@@ -875,11 +910,8 @@ fn parse_claude_usage_snapshot(data: &serde_json::Value) -> Option<ClaudeUsageSn
         (None, None) => None,
     };
 
-    if summary.is_none() {
-        None
-    } else {
-        Some(ClaudeUsageSnapshot { summary })
-    }
+    summary.as_ref()?;
+    Some(ClaudeUsageSnapshot { summary })
 }
 
 fn load_claude_usage_snapshot() -> Option<ClaudeUsageSnapshot> {
@@ -946,16 +978,6 @@ fn parse_copilot_usage_snapshot(data: &serde_json::Value) -> Option<CopilotUsage
         .or_else(|| {
             premium
                 .get("remaining")
-                .and_then(|value| value.as_i64().map(|v| v as f64))
-        })
-        .or_else(|| {
-            premium
-                .get("remaining")
-                .and_then(|value| value.as_u64().map(|v| v as f64))
-        })
-        .or_else(|| {
-            premium
-                .get("remaining")
                 .and_then(|value| value.as_str()?.parse::<f64>().ok())
         })
         .or_else(|| {
@@ -994,6 +1016,8 @@ fn gemini_quota_summary(data: &serde_json::Value) -> Option<String> {
         .and_then(|auth| auth.get("selectedType"))
         .and_then(|value| value.as_str())?;
 
+    // Gemini CLI doesn't expose a stable local "remaining quota" endpoint yet,
+    // so these are approximate plan limits used for quick at-a-glance guidance.
     match auth_type {
         "oauth-personal" => Some("Quota 1000/day · 60/min".into()),
         "gemini-api-key" | "api-key" => Some("Quota 250/day · 10/min".into()),
@@ -2277,6 +2301,8 @@ struct App {
     tool_index: usize,
     field_index: usize,
     assistant_collapsed: bool,
+    usage_update_rx: Option<Receiver<UsageSummaryUpdate>>,
+    usage_update_tx: Option<Sender<UsageSummaryUpdate>>,
     focus: Focus,
     mode: AppMode,
     status_msg: Option<String>,
@@ -2300,14 +2326,7 @@ fn status_value_for_display(field_key: &str, new_val: &str) -> String {
 impl App {
     fn new() -> Self {
         let show_assistant = kaku_assistant_visible();
-        let tools: Vec<ToolState> = ALL_TOOLS
-            .iter()
-            .map(|t| ToolState::load(*t))
-            .filter(|t| {
-                (t.tool != Tool::KakuAssistant || show_assistant)
-                    && (matches!(t.tool, Tool::KakuAssistant | Tool::Codex) || t.installed)
-            })
-            .collect();
+        let tools = Self::load_tools(show_assistant);
         let assistant_collapsed = tools
             .iter()
             .find(|tool| tool.tool == Tool::KakuAssistant)
@@ -2319,6 +2338,8 @@ impl App {
             tool_index: first,
             field_index: 0,
             assistant_collapsed,
+            usage_update_rx: None,
+            usage_update_tx: None,
             focus: Focus::ToolList,
             mode: AppMode::Browsing,
             status_msg: None,
@@ -2327,8 +2348,20 @@ impl App {
             error_expire: None,
             should_quit: false,
         };
+        app.restart_usage_loading();
         app.sync_transient_errors();
         app
+    }
+
+    fn load_tools(show_assistant: bool) -> Vec<ToolState> {
+        ALL_TOOLS
+            .iter()
+            .map(|t| ToolState::load_without_remote_usage(*t))
+            .filter(|t| {
+                (t.tool != Tool::KakuAssistant || show_assistant)
+                    && (matches!(t.tool, Tool::KakuAssistant | Tool::Codex) || t.installed)
+            })
+            .collect()
     }
 
     fn tool_row_count(&self, tool_index: usize) -> usize {
@@ -2345,8 +2378,12 @@ impl App {
         tool.fields.len()
     }
 
-    fn current_tool(&self) -> &ToolState {
-        &self.tools[self.tool_index]
+    fn current_tool(&self) -> Option<&ToolState> {
+        self.tools.get(self.tool_index)
+    }
+
+    fn current_tool_mut(&mut self) -> Option<&mut ToolState> {
+        self.tools.get_mut(self.tool_index)
     }
 
     fn tool_is_collapsed(&self, tool_index: usize) -> bool {
@@ -2356,7 +2393,7 @@ impl App {
     }
 
     fn selected_field_index(&self) -> Option<usize> {
-        let tool = self.current_tool();
+        let tool = self.current_tool()?;
         if tool.fields.is_empty() {
             return None;
         }
@@ -2386,7 +2423,10 @@ impl App {
         }
 
         self.assistant_collapsed = !self.assistant_collapsed;
-        if self.current_tool().tool == Tool::KakuAssistant {
+        if self
+            .current_tool()
+            .is_some_and(|tool| tool.tool == Tool::KakuAssistant)
+        {
             self.field_index = 0;
         }
         self.set_status(if self.assistant_collapsed {
@@ -2475,6 +2515,8 @@ impl App {
     }
 
     fn sync_transient_errors(&mut self) {
+        self.drain_usage_updates();
+
         while let Some(error) = pop_ui_error() {
             self.set_error(error);
         }
@@ -2493,6 +2535,81 @@ impl App {
         {
             self.last_error = None;
             self.error_expire = None;
+        }
+    }
+
+    fn restart_usage_loading(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        let mut spawned = false;
+
+        for tool in self
+            .tools
+            .iter()
+            .filter(|tool| tool.installed && supports_remote_usage(tool.tool))
+        {
+            spawned = true;
+            let tx = tx.clone();
+            let tool_kind = tool.tool;
+            std::thread::spawn(move || {
+                let _ = tx.send(UsageSummaryUpdate {
+                    tool: tool_kind,
+                    summary: load_usage_summary(tool_kind),
+                });
+            });
+        }
+
+        if spawned {
+            self.usage_update_rx = Some(rx);
+            self.usage_update_tx = Some(tx);
+        } else {
+            self.usage_update_rx = None;
+            self.usage_update_tx = None;
+        }
+    }
+
+    fn schedule_usage_reload(&self, tool: Tool) {
+        if !supports_remote_usage(tool) {
+            return;
+        }
+        if !self
+            .tools
+            .iter()
+            .any(|entry| entry.tool == tool && entry.installed)
+        {
+            return;
+        }
+        let Some(tx) = self.usage_update_tx.clone() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let _ = tx.send(UsageSummaryUpdate {
+                tool,
+                summary: load_usage_summary(tool),
+            });
+        });
+    }
+
+    fn drain_usage_updates(&mut self) {
+        let Some(rx) = &self.usage_update_rx else {
+            return;
+        };
+
+        let mut updates = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            updates.push(update);
+        }
+
+        for update in updates {
+            if let Some(index) = self.tools.iter().position(|tool| tool.tool == update.tool) {
+                let installed = self.tools[index].installed;
+                let summary = summarize_tool_fields(
+                    update.tool,
+                    installed,
+                    &self.tools[index].fields,
+                    update.summary.as_deref(),
+                );
+                self.tools[index].summary = summary;
+            }
         }
     }
 
@@ -2546,12 +2663,17 @@ impl App {
     }
 
     fn start_edit(&mut self) {
-        if self.current_tool().tool == Tool::KakuAssistant && self.field_index == 0 {
+        if self
+            .current_tool()
+            .is_some_and(|tool| tool.tool == Tool::KakuAssistant && self.field_index == 0)
+        {
             self.toggle_kaku_assistant_collapsed();
             return;
         }
 
-        let tool = &self.tools[self.tool_index];
+        let Some(tool) = self.current_tool() else {
+            return;
+        };
         if !tool.installed || tool.fields.is_empty() {
             return;
         }
@@ -2628,27 +2750,27 @@ impl App {
         };
         self.focus = Focus::ToolList;
 
-        if self.tool_index >= self.tools.len() {
-            return;
-        }
-        if field_idx >= self.tools[self.tool_index].fields.len() {
-            return;
-        }
         if selected >= options.len() {
             return;
         }
 
-        let tool_kind = self.tools[self.tool_index].tool;
+        let Some((tool_kind, field_key, old_val)) = self.current_tool().and_then(|tool| {
+            tool.fields
+                .get(field_idx)
+                .map(|field| (tool.tool, field.key.clone(), field.value.clone()))
+        }) else {
+            return;
+        };
         self.field_index = self.display_index_for_field(tool_kind, field_idx);
         let new_val = options[selected].clone();
-        let field_key = self.tools[self.tool_index].fields[field_idx].key.clone();
-        let old_val = self.tools[self.tool_index].fields[field_idx].value.clone();
 
         if new_val == old_val {
             return;
         }
 
-        self.tools[self.tool_index].fields[field_idx].value = new_val.clone();
+        if let Some(tool) = self.current_tool_mut() {
+            tool.fields[field_idx].value = new_val.clone();
+        }
         let status_val = status_value_for_display(&field_key, &new_val);
         match save_field(tool_kind, &field_key, &new_val) {
             Ok(()) => self.set_status(format!("Saved {} → {}", field_key, status_val)),
@@ -2676,34 +2798,35 @@ impl App {
         };
         self.focus = Focus::ToolList;
 
-        let tool = &mut self.tools[self.tool_index];
-        if field_idx >= tool.fields.len() {
+        let Some((tool_kind, field_key, old_val)) = self.current_tool().and_then(|tool| {
+            tool.fields
+                .get(field_idx)
+                .map(|field| (tool.tool, field.key.clone(), field.value.clone()))
+        }) else {
             return;
-        }
-
-        let tool_kind = tool.tool;
+        };
         self.field_index = if tool_kind == Tool::KakuAssistant {
             field_idx + 1
         } else {
             field_idx
         };
         let new_val = buffer.trim().to_string();
-        let field_key = tool.fields[field_idx].key.clone();
 
         // Empty input on API Key fields means cancel, not clear
         if new_val.is_empty() && field_key.contains("API Key") {
             return;
         }
 
-        let old_val = tool.fields[field_idx].value.clone();
         if new_val == old_val || (new_val.is_empty() && old_val == "—") {
             return;
         }
 
-        tool.fields[field_idx].value = new_val.clone();
+        if let Some(tool) = self.current_tool_mut() {
+            tool.fields[field_idx].value = new_val.clone();
+        }
 
         let status_val = status_value_for_display(&field_key, &new_val);
-        match save_field(tool.tool, &field_key, &new_val) {
+        match save_field(tool_kind, &field_key, &new_val) {
             Ok(()) => self.set_status(format!("Saved {} → {}", field_key, status_val)),
             Err(e) => {
                 self.set_status(format!("Save failed: {}", e));
@@ -2714,13 +2837,20 @@ impl App {
     }
 
     fn reload_current_tool(&mut self) {
-        let tool_type = self.tools[self.tool_index].tool;
-        self.tools[self.tool_index] = ToolState::load(tool_type);
+        let Some(tool_type) = self.current_tool().map(|tool| tool.tool) else {
+            return;
+        };
+        let refreshed = ToolState::load_without_remote_usage(tool_type);
+        if let Some(tool) = self.current_tool_mut() {
+            *tool = refreshed;
+        }
         if tool_type == Tool::KakuAssistant {
-            self.assistant_collapsed =
-                should_collapse_kaku_assistant(&self.tools[self.tool_index].fields);
+            if let Some(tool) = self.current_tool() {
+                self.assistant_collapsed = should_collapse_kaku_assistant(&tool.fields);
+            }
             self.field_index = 0;
         }
+        self.schedule_usage_reload(tool_type);
     }
 
     fn cancel_edit(&mut self) {
@@ -2729,7 +2859,9 @@ impl App {
     }
 
     fn open_config(&mut self) {
-        let tool = &self.tools[self.tool_index];
+        let Some(tool) = self.current_tool() else {
+            return;
+        };
         let path = tool.tool.config_path();
         if !path.exists() {
             return;
@@ -2775,14 +2907,14 @@ impl App {
         match fetch_models_dev_json() {
             Some(_) => {
                 let show_assistant = kaku_assistant_visible();
-                self.tools = ALL_TOOLS
+                self.tools = Self::load_tools(show_assistant);
+                self.tool_index = self
+                    .tools
                     .iter()
-                    .map(|t| ToolState::load(*t))
-                    .filter(|t| {
-                        (t.tool != Tool::KakuAssistant || show_assistant)
-                            && (matches!(t.tool, Tool::KakuAssistant | Tool::Codex) || t.installed)
-                    })
-                    .collect();
+                    .position(|tool| !tool.fields.is_empty())
+                    .unwrap_or(0);
+                self.field_index = 0;
+                self.restart_usage_loading();
                 self.set_status("AI settings refreshed");
                 self.sync_transient_errors();
             }

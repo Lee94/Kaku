@@ -291,7 +291,9 @@ fn render_status_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 pub(super) fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let tool = &app.tools[app.tool_index];
+    let Some(tool) = app.tools.get(app.tool_index) else {
+        return;
+    };
     let Some((field_idx, edit_buf, edit_cursor)) = app.editing_view() else {
         return;
     };
@@ -363,7 +365,9 @@ pub(super) fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let tool = &app.tools[app.tool_index];
+    let Some(tool) = app.tools.get(app.tool_index) else {
+        return;
+    };
     let Some((field_idx, select_options, select_index)) = app.selecting_view() else {
         return;
     };
