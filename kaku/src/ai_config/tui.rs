@@ -611,7 +611,7 @@ where
     load_usage_json_from_cache(&path, context)
 }
 
-fn read_claude_oauth_access_token() -> Option<String> {
+fn read_claude_oauth_credentials() -> Option<serde_json::Value> {
     let output = std::process::Command::new("/usr/bin/security")
         .args([
             "find-generic-password",
@@ -634,9 +634,13 @@ fn read_claude_oauth_access_token() -> Option<String> {
     let raw = String::from_utf8(output.stdout)
         .map_err(|err| log::debug!("claude keychain probe returned non-utf8 stdout: {}", err))
         .ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(raw.trim())
+    serde_json::from_str::<serde_json::Value>(raw.trim())
         .map_err(|err| log::debug!("failed to parse claude keychain json: {}", err))
-        .ok()?;
+        .ok()
+}
+
+fn read_claude_oauth_access_token() -> Option<String> {
+    let parsed = read_claude_oauth_credentials()?;
 
     parsed
         .get("claudeAiOauth")
@@ -646,21 +650,7 @@ fn read_claude_oauth_access_token() -> Option<String> {
 }
 
 fn read_claude_oauth_refresh_token() -> Option<String> {
-    let output = std::process::Command::new("/usr/bin/security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-w",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let raw = String::from_utf8(output.stdout).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    let parsed = read_claude_oauth_credentials()?;
     parsed
         .get("claudeAiOauth")
         .and_then(|value| value.get("refreshToken"))
@@ -668,7 +658,71 @@ fn read_claude_oauth_refresh_token() -> Option<String> {
         .map(|value| value.to_string())
 }
 
+fn parse_claude_keychain_account(raw: &str) -> Option<String> {
+    let marker = "\"acct\"<blob>=\"";
+    raw.lines().find_map(|line| {
+        let line = line.trim();
+        let start = line.find(marker)? + marker.len();
+        let end = line[start..].find('"')?;
+        Some(line[start..start + end].to_string())
+    })
+}
+
+fn read_claude_keychain_account() -> Option<String> {
+    let output = std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::debug!(
+            "claude keychain account probe failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+        return None;
+    }
+
+    let raw = String::from_utf8(output.stdout)
+        .map_err(|err| log::debug!("claude keychain account probe returned non-utf8: {}", err))
+        .ok()?;
+    parse_claude_keychain_account(&raw)
+}
+
+fn write_claude_oauth_credentials(credentials: &serde_json::Value) -> Option<()> {
+    let account = read_claude_keychain_account()?;
+    let secret = serde_json::to_string(credentials)
+        .map_err(|err| log::debug!("failed to serialize claude keychain json: {}", err))
+        .ok()?;
+
+    let output = std::process::Command::new("/usr/bin/security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-a",
+            &account,
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+            &secret,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!(
+            "failed to update claude keychain credentials: status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+        return None;
+    }
+
+    Some(())
+}
+
 fn refresh_claude_oauth_access_token() -> Option<String> {
+    let current_credentials = read_claude_oauth_credentials()?;
     let refresh_token = read_claude_oauth_refresh_token()?;
     let refreshed = run_curl(&[
         "-sS",
@@ -687,10 +741,47 @@ fn refresh_claude_oauth_access_token() -> Option<String> {
         &format!("client_id={CLAUDE_OAUTH_CLIENT_ID}"),
     ])?;
 
-    refreshed
+    let access_token = refreshed
         .get("access_token")
         .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
+        .map(|value| value.to_string())?;
+    let rotated_refresh_token = refreshed
+        .get("refresh_token")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&refresh_token)
+        .to_string();
+
+    let mut updated_credentials = current_credentials;
+    let oauth = updated_credentials
+        .get_mut("claudeAiOauth")
+        .and_then(|value| value.as_object_mut())?;
+    oauth.insert(
+        "accessToken".into(),
+        serde_json::Value::String(access_token.clone()),
+    );
+    oauth.insert(
+        "refreshToken".into(),
+        serde_json::Value::String(rotated_refresh_token),
+    );
+
+    if let Some(expires_in) = refreshed.get("expires_in").and_then(|value| value.as_i64()) {
+        let expires_at_ms = Utc::now().timestamp_millis() + expires_in * 1000;
+        oauth.insert(
+            "expiresAt".into(),
+            serde_json::Value::Number(expires_at_ms.into()),
+        );
+    }
+
+    if let Some(scope) = refreshed.get("scope").and_then(|value| value.as_str()) {
+        let scopes = scope
+            .split_whitespace()
+            .map(|item| serde_json::Value::String(item.to_string()))
+            .collect::<Vec<_>>();
+        oauth.insert("scopes".into(), serde_json::Value::Array(scopes));
+    }
+
+    let _ = write_claude_oauth_credentials(&updated_credentials);
+    Some(access_token)
 }
 
 fn fetch_claude_usage_with_access_token(access_token: &str) -> Option<serde_json::Value> {
@@ -3502,6 +3593,20 @@ mod tests {
 
         let snapshot = parse_claude_usage_snapshot(&parsed).expect("snapshot");
         assert_eq!(snapshot.summary, Some("Re-auth required".into()));
+    }
+
+    #[test]
+    fn parse_claude_keychain_account_extracts_account_name() {
+        let raw = r#"
+keychain: "/Users/tw93/Library/Keychains/login.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    "acct"<blob>="tw93"
+    "svce"<blob>="Claude Code-credentials"
+"#;
+
+        assert_eq!(parse_claude_keychain_account(raw), Some("tw93".into()));
     }
 
     #[test]
