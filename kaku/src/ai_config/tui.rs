@@ -16,8 +16,9 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod ui;
@@ -2686,6 +2687,7 @@ struct App {
     assistant_collapsed: bool,
     usage_update_rx: Option<Receiver<UsageSummaryUpdate>>,
     usage_update_tx: Option<Sender<UsageSummaryUpdate>>,
+    usage_update_generation: Arc<AtomicUsize>,
     focus: Focus,
     mode: AppMode,
     status_msg: Option<String>,
@@ -2723,6 +2725,7 @@ impl App {
             assistant_collapsed,
             usage_update_rx: None,
             usage_update_tx: None,
+            usage_update_generation: Arc::new(AtomicUsize::new(0)),
             focus: Focus::ToolList,
             mode: AppMode::Browsing,
             status_msg: None,
@@ -2922,8 +2925,12 @@ impl App {
     }
 
     fn restart_usage_loading(&mut self) {
+        self.usage_update_rx = None;
+        self.usage_update_tx = None;
+
         let (tx, rx) = mpsc::channel();
         let mut spawned = false;
+        let generation = self.usage_update_generation.fetch_add(1, Ordering::Relaxed) + 1;
 
         for tool in self
             .tools
@@ -2933,10 +2940,18 @@ impl App {
             spawned = true;
             let tx = tx.clone();
             let tool_kind = tool.tool;
+            let active_generation = Arc::clone(&self.usage_update_generation);
             std::thread::spawn(move || {
+                if active_generation.load(Ordering::Relaxed) != generation {
+                    return;
+                }
+                let summary = load_usage_summary(tool_kind);
+                if active_generation.load(Ordering::Relaxed) != generation {
+                    return;
+                }
                 let _ = tx.send(UsageSummaryUpdate {
                     tool: tool_kind,
-                    summary: load_usage_summary(tool_kind),
+                    summary,
                 });
             });
         }
@@ -2964,11 +2979,17 @@ impl App {
         let Some(tx) = self.usage_update_tx.clone() else {
             return;
         };
+        let generation = self.usage_update_generation.load(Ordering::Relaxed);
+        let active_generation = Arc::clone(&self.usage_update_generation);
         std::thread::spawn(move || {
-            let _ = tx.send(UsageSummaryUpdate {
-                tool,
-                summary: load_usage_summary(tool),
-            });
+            if active_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let summary = load_usage_summary(tool);
+            if active_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let _ = tx.send(UsageSummaryUpdate { tool, summary });
         });
     }
 

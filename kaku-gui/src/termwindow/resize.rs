@@ -684,6 +684,14 @@ pub(super) fn load_persisted_font_scale(config: &ConfigHandle) -> Option<f64> {
 /// Visual spacing adjustment for tab bar layouts.
 const VISUAL_SPACING: usize = 4;
 
+fn effective_top_padding(base_top: usize, default_top: usize) -> usize {
+    if base_top == default_top {
+        base_top + VISUAL_SPACING
+    } else {
+        base_top
+    }
+}
+
 /// Computes vertical padding used for layout.
 /// Tab bar height is subtracted from the side where it appears,
 /// keeping content spacing stable when tab bar visibility changes.
@@ -696,8 +704,12 @@ pub fn effective_vertical_padding(
 ) -> (usize, usize) {
     let base_top = config.window_padding.top.evaluate_as_pixels(context) as usize;
     let base_bottom = config.window_padding.bottom.evaluate_as_pixels(context) as usize;
+    let default_top = ConfigHandle::default_config()
+        .window_padding
+        .top
+        .evaluate_as_pixels(context) as usize;
 
-    let mut top = base_top + VISUAL_SPACING;
+    let mut top = effective_top_padding(base_top, default_top);
     let mut bottom = base_bottom;
 
     // Subtract tab bar height from its side to keep content spacing stable.
@@ -726,7 +738,7 @@ pub fn effective_right_padding(config: &ConfigHandle, context: DimensionContext)
 
 #[cfg(test)]
 mod tests {
-    use super::effective_vertical_padding;
+    use super::{effective_top_padding, effective_vertical_padding};
     use config::{ConfigHandle, DimensionContext};
 
     fn context() -> DimensionContext {
@@ -753,6 +765,12 @@ mod tests {
 
         assert_eq!(top, base_top + 4);
         assert_eq!(bottom, base_bottom);
+    }
+
+    #[test]
+    fn explicit_top_padding_can_disable_visual_spacing() {
+        assert_eq!(effective_top_padding(0, 8), 0);
+        assert_eq!(effective_top_padding(12, 8), 12);
     }
 
     #[test]

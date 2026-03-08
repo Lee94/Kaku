@@ -203,8 +203,6 @@ lazy_static::lazy_static! {
     static ref WINDOW_CLASS: Mutex<String> = Mutex::new(wezterm_gui_subcommands::DEFAULT_WINDOW_CLASS.to_owned());
     static ref POSITION: Mutex<Option<GuiPosition>> = Mutex::new(None);
     static ref RENDER_METRICS_CACHE: Mutex<Option<RenderMetricsCacheEntry>> = Mutex::new(None);
-    static ref CLOSED_TAB_HISTORY: Mutex<std::collections::VecDeque<PathBuf>> =
-        Mutex::new(std::collections::VecDeque::new());
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -768,6 +766,7 @@ pub struct TermWindow {
     config_subscription: Option<config::ConfigSubscription>,
     pending_config_reload_after_resize: bool,
     silent_reload_queued: bool,
+    closed_tab_history: std::collections::VecDeque<PathBuf>,
 
     /// Toast notification: (start_time, message, lifetime)
     toast: Option<(Instant, String, Duration)>,
@@ -1085,6 +1084,7 @@ impl TermWindow {
             config_subscription: None,
             pending_config_reload_after_resize: false,
             silent_reload_queued: false,
+            closed_tab_history: std::collections::VecDeque::new(),
             os_parameters: None,
             gl: None,
             webgpu: None,
@@ -3361,7 +3361,7 @@ impl TermWindow {
             CloseCurrentTab { confirm } => self.close_current_tab(*confirm),
             CloseCurrentPane { confirm } => self.close_current_pane(*confirm),
             ReopenLastClosedTab => {
-                if let Some(cwd) = Self::pop_closed_tab_cwd() {
+                if let Some(cwd) = self.pop_closed_tab_cwd() {
                     let spawn = SpawnCommand {
                         cwd: Some(cwd),
                         domain: config::keyassignment::SpawnTabDomain::CurrentPaneDomain,
@@ -4079,7 +4079,7 @@ impl TermWindow {
                     .and_then(|url| url.to_file_path().ok())
                 {
                     if cwd.is_absolute() {
-                        Self::push_closed_tab_cwd(cwd);
+                        self.push_closed_tab_cwd(cwd);
                     }
                 }
             }
@@ -4087,18 +4087,17 @@ impl TermWindow {
         }
     }
 
-    /// Push a cwd onto the shared closed-tab history stack (max 10 entries).
-    fn push_closed_tab_cwd(cwd: PathBuf) {
+    /// Push a cwd onto this window's closed-tab history stack (max 10 entries).
+    fn push_closed_tab_cwd(&mut self, cwd: PathBuf) {
         const MAX_CLOSED_TABS: usize = 10;
-        let mut closed_tabs = CLOSED_TAB_HISTORY.lock().unwrap();
-        closed_tabs.push_back(cwd);
-        if closed_tabs.len() > MAX_CLOSED_TABS {
-            closed_tabs.pop_front();
+        self.closed_tab_history.push_back(cwd);
+        if self.closed_tab_history.len() > MAX_CLOSED_TABS {
+            self.closed_tab_history.pop_front();
         }
     }
 
-    fn pop_closed_tab_cwd() -> Option<PathBuf> {
-        CLOSED_TAB_HISTORY.lock().unwrap().pop_back()
+    fn pop_closed_tab_cwd(&mut self) -> Option<PathBuf> {
+        self.closed_tab_history.pop_back()
     }
 
     pub fn pane_state(&self, pane_id: PaneId) -> RefMut<'_, PaneState> {

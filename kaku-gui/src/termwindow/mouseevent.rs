@@ -125,6 +125,7 @@ impl super::TermWindow {
         };
 
         if event.mouse_buttons != WMB::LEFT {
+            self.tab_drag_state = Some(state);
             return false;
         }
 
