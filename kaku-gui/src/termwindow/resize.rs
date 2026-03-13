@@ -67,6 +67,18 @@ fn should_preserve_terminal_cells_on_scale_change(
     font_scale_changed || (simple_dpi_change && allow_terminal_size_preservation)
 }
 
+fn should_defer_screen_change_scale_update(
+    live_resizing: bool,
+    screen_changed: bool,
+    has_pending_screen_change_resize: bool,
+    current_dpi: usize,
+    incoming_dpi: usize,
+) -> bool {
+    live_resizing
+        && incoming_dpi != current_dpi
+        && (screen_changed || has_pending_screen_change_resize)
+}
+
 impl super::TermWindow {
     pub fn resize(
         &mut self,
@@ -92,6 +104,14 @@ impl super::TermWindow {
             return;
         }
         let mut normalized_window_state = window_state;
+        if live_resizing
+            && self.pending_screen_change_resize
+            && dimensions.dpi == self.dimensions.dpi
+        {
+            // The user dragged back onto the original screen before the live resize
+            // ended, so the deferred DPI transition is no longer relevant.
+            self.pending_screen_change_resize = false;
+        }
         let dimensions_unchanged = dimensions == self.dimensions;
         let was_fullscreen = self.window_state.contains(WindowState::FULL_SCREEN);
         let incoming_fullscreen = normalized_window_state.contains(WindowState::FULL_SCREEN);
@@ -144,16 +164,52 @@ impl super::TermWindow {
             webgpu.resize(dimensions);
         }
 
-        // Align fullscreen transition handling with maximize/restore behavior:
-        // keep current dpi for this transition frame so text doesn't pop larger/smaller.
-        if fullscreen_transition && self.dimensions.dpi != dimensions.dpi {
+        if should_defer_screen_change_scale_update(
+            live_resizing,
+            screen_changed,
+            self.pending_screen_change_resize,
+            self.dimensions.dpi,
+            dimensions.dpi,
+        ) {
+            log::trace!(
+                "deferring cross-screen dpi update until live resize ends: current_dpi={} incoming_dpi={} dims={:?}",
+                self.dimensions.dpi,
+                dimensions.dpi,
+                dimensions,
+            );
+            self.pending_screen_change_resize = true;
+
             let mut stabilized = dimensions;
             stabilized.dpi = self.dimensions.dpi;
-            self.apply_dimensions(&stabilized, None, window);
+            self.apply_dimensions(
+                &stabilized,
+                Some(self.current_cell_dimensions()),
+                window,
+                false,
+            );
+        } else if !live_resizing
+            && self.pending_screen_change_resize
+            && dimensions.dpi != self.dimensions.dpi
+        {
+            log::trace!(
+                "committing deferred cross-screen dpi update after live resize: current_dpi={} incoming_dpi={} dims={:?}",
+                self.dimensions.dpi,
+                dimensions.dpi,
+                dimensions,
+            );
+            self.pending_screen_change_resize = false;
+            self.scaling_changed(dimensions, self.fonts.get_font_scale(), window, false);
+
+        // Align fullscreen transition handling with maximize/restore behavior:
+        // keep current dpi for this transition frame so text doesn't pop larger/smaller.
+        } else if fullscreen_transition && self.dimensions.dpi != dimensions.dpi {
+            let mut stabilized = dimensions;
+            stabilized.dpi = self.dimensions.dpi;
+            self.apply_dimensions(&stabilized, None, window, true);
         } else if live_resizing && self.dimensions.dpi == dimensions.dpi {
             // For simple, user-interactive resizes where the dpi doesn't change,
             // skip our scaling recalculation.
-            self.apply_dimensions(&dimensions, None, window);
+            self.apply_dimensions(&dimensions, None, window, true);
         } else {
             self.scaling_changed(
                 dimensions,
@@ -237,11 +293,13 @@ impl super::TermWindow {
         dimensions: &Dimensions,
         mut scale_changed_cells: Option<RowsAndCols>,
         window: &Window,
+        allow_speculative_window_resize: bool,
     ) {
         log::trace!(
-            "apply_dimensions {:?} scale_changed_cells {:?}. window_state {:?}",
+            "apply_dimensions {:?} scale_changed_cells {:?} allow_speculative_window_resize={}. window_state {:?}",
             dimensions,
             scale_changed_cells,
+            allow_speculative_window_resize,
             self.window_state
         );
         let saved_dims = self.dimensions;
@@ -453,7 +511,7 @@ impl super::TermWindow {
             // and we'll end up with weirdness where our window renders in the
             // middle of a larger region that the compositor thinks we live in.
             // Wayland is weird!
-            if saved_dims != dims {
+            if allow_speculative_window_resize && saved_dims != dims {
                 log::trace!(
                     "scale changed so resize from {:?} to {:?} {:?} (event called with {:?})",
                     saved_dims,
@@ -473,6 +531,13 @@ impl super::TermWindow {
                 // Stashing the dimensions here avoids that misconception.
                 self.dimensions = dims;
                 self.set_inner_size(window, dims.pixel_width, dims.pixel_height);
+            } else if !allow_speculative_window_resize {
+                log::trace!(
+                    "skipping speculative resize during deferred screen-change scaling: saved_dims={:?} computed_dims={:?} {:?}",
+                    saved_dims,
+                    dims,
+                    cell_dims,
+                );
             }
         }
     }
@@ -571,7 +636,7 @@ impl super::TermWindow {
             allow_terminal_size_preservation,
             scale_changed_cells,
         );
-        self.apply_dimensions(&dimensions, scale_changed_cells, window);
+        self.apply_dimensions(&dimensions, scale_changed_cells, window, true);
     }
 
     /// Used for applying font size changes only; this takes into account
@@ -598,7 +663,7 @@ impl super::TermWindow {
             // Compute new font metrics
             self.apply_scale_change(&dimensions, font_scale);
             // Now revise the pty size to fit the window
-            self.apply_dimensions(&dimensions, None, window);
+            self.apply_dimensions(&dimensions, None, window, true);
         }
 
         persist_current_font_size(&self.config, self.fonts.get_font_scale());
@@ -684,6 +749,7 @@ impl super::TermWindow {
                 cols: size.cols as usize,
             }),
             window,
+            true,
         );
         Ok(())
     }
@@ -981,7 +1047,8 @@ pub fn effective_right_padding(config: &Config, context: DimensionContext) -> us
 mod tests {
     use super::{
         effective_top_padding, effective_vertical_padding_with_policy,
-        rebalance_top_padding_for_bottom_gap, should_normalize_fullscreen_state_on_resize,
+        rebalance_top_padding_for_bottom_gap, should_defer_screen_change_scale_update,
+        should_normalize_fullscreen_state_on_resize,
         should_preserve_terminal_cells_on_scale_change,
         should_rebalance_top_tab_visible_bottom_gap, user_custom_window_padding_config_path,
     };
@@ -1357,6 +1424,22 @@ mod tests {
         ));
         assert!(should_preserve_terminal_cells_on_scale_change(
             true, false, false
+        ));
+    }
+
+    #[test]
+    fn live_resize_defers_cross_screen_dpi_updates() {
+        assert!(should_defer_screen_change_scale_update(
+            true, true, false, 96, 192
+        ));
+        assert!(should_defer_screen_change_scale_update(
+            true, false, true, 96, 192
+        ));
+        assert!(!should_defer_screen_change_scale_update(
+            false, true, false, 96, 192
+        ));
+        assert!(!should_defer_screen_change_scale_update(
+            true, true, false, 96, 96
         ));
     }
 }

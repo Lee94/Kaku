@@ -832,6 +832,7 @@ pub struct TermWindow {
 
     /// Tracks whether we are currently in a live resize operation
     live_resizing: bool,
+    pending_screen_change_resize: bool,
 
     gl: Option<Rc<glium::backend::Context>>,
     webgpu: Option<Rc<WebGpuState>>,
@@ -986,7 +987,7 @@ impl TermWindow {
             // where stale tab-bar visibility is most noticeable.
             self.sync_tab_bar_visibility_for_window_state("focus_changed:sync_tab_bar");
             let dimensions = self.dimensions;
-            self.apply_dimensions(&dimensions, None, window);
+            self.apply_dimensions(&dimensions, None, window, true);
             self.schedule_deferred_layout_relayout(window);
         } else if focused && !self.config.tab_bar_at_bottom {
             // Top-tab (both fullscreen and non-fullscreen): ONLY run a deferred
@@ -1032,7 +1033,7 @@ impl TermWindow {
                 self.invalidate_fancy_tab_bar();
                 self.sync_tab_bar_visibility_for_window_state("visibility_changed:sync_tab_bar");
                 let dimensions = self.dimensions;
-                self.apply_dimensions(&dimensions, None, window);
+                self.apply_dimensions(&dimensions, None, window, true);
                 self.schedule_deferred_layout_relayout(window);
             } else if !self.config.tab_bar_at_bottom {
                 // Top-tab: ONLY run deferred relayout.
@@ -1140,7 +1141,7 @@ impl TermWindow {
                         "deferred_layout_relayout:sync_tab_bar",
                     );
                     let dimensions = tw.dimensions;
-                    tw.apply_dimensions(&dimensions, None, &owned_window);
+                    tw.apply_dimensions(&dimensions, None, &owned_window, true);
                     owned_window.invalidate();
                 }
             })));
@@ -1418,6 +1419,7 @@ impl TermWindow {
             toast: None,
             selection_copy_disabled_hint_shown: false,
             live_resizing: false,
+            pending_screen_change_resize: false,
         };
 
         let tw = Rc::new(RefCell::new(myself));
@@ -2624,7 +2626,7 @@ impl TermWindow {
             self.load_os_parameters();
             self.sync_tab_bar_visibility_for_window_state("config_reload");
             self.apply_scale_change(&dimensions, self.fonts.get_font_scale());
-            self.apply_dimensions(&dimensions, None, &window);
+            self.apply_dimensions(&dimensions, None, &window, true);
             self.update_scrollbar();
             // Rebuild tab bar state synchronously so tab bar colors match the
             // new palette in the same invalidate cycle as pane colors.
@@ -3066,7 +3068,7 @@ impl TermWindow {
             // caused by a full config_was_reloaded() call.
             if self.sync_tab_bar_visibility_for_window_state("update_title:sync_tab_bar") {
                 let dimensions = self.dimensions;
-                self.apply_dimensions(&dimensions, None, &window);
+                self.apply_dimensions(&dimensions, None, &window, true);
                 window.invalidate();
             }
         }
