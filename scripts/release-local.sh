@@ -9,7 +9,7 @@ cd "$REPO_ROOT"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 VERSION="${1:-}"
-OUT_DIR="${OUT_DIR:-$HOME/Downloads}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 
 # ── Step 1: Determine version ─────────────────────────────────────────────────
 if [[ -z "$VERSION" ]]; then

@@ -5,12 +5,16 @@ use crate::menu::{Menu, MenuItem};
 use crate::{ApplicationEvent, Connection, KeyCode, Modifiers};
 use cocoa::appkit::{
     NSApp, NSApplicationActivateIgnoringOtherApps, NSApplicationTerminateReply,
-    NSFilenamesPboardType, NSRunningApplication, NSStringPboardType,
+    NSEventModifierFlags, NSFilenamesPboardType, NSRunningApplication, NSStringPboardType,
 };
 use cocoa::base::{id, nil};
 use cocoa::foundation::NSInteger;
 use config::keyassignment::KeyAssignment;
 use config::WindowCloseConfirmation;
+use core_foundation::base::{CFTypeID, TCFType};
+use core_foundation::data::{CFData, CFDataGetBytePtr, CFDataRef};
+use core_foundation::string::{CFStringRef, UniChar};
+use core_foundation::{declare_TCFType, impl_TCFType};
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
 use objc::*;
@@ -23,7 +27,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use url::Url;
 
-use super::keycodes::phys_to_vkey;
+use super::keycodes::{layout_printable_vkeys, phys_to_vkey};
 
 const CLS_NAME: &str = "KakuAppDelegate";
 
@@ -32,6 +36,7 @@ type EventHotKeyRef = *mut c_void;
 type EventTargetRef = *mut c_void;
 type EventHandlerCallRef = *mut c_void;
 type EventRef = *mut c_void;
+type UniCharCount = std::os::raw::c_ulong;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -58,6 +63,22 @@ const SHIFT_KEY: u32 = 1 << 9;
 const OPTION_KEY: u32 = 1 << 11;
 const CONTROL_KEY: u32 = 1 << 12;
 const CMD_KEY: u32 = 1 << 8;
+#[allow(non_upper_case_globals)]
+const kUCKeyActionDisplay: u16 = 3;
+
+#[repr(C)]
+pub struct __InputSource {
+    _dummy: i32,
+}
+type InputSourceRef = *const __InputSource;
+
+declare_TCFType!(InputSource, InputSourceRef);
+impl_TCFType!(InputSource, InputSourceRef, TISInputSourceGetTypeID);
+
+#[repr(C)]
+struct UCKeyboardLayout {
+    _dummy: i32,
+}
 
 unsafe extern "C" {
     fn InstallEventHandler(
@@ -78,6 +99,23 @@ unsafe extern "C" {
     ) -> OSStatus;
     fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> OSStatus;
     fn GetApplicationEventTarget() -> EventTargetRef;
+    fn TISInputSourceGetTypeID() -> CFTypeID;
+    fn TISCopyCurrentKeyboardInputSource() -> InputSourceRef;
+    fn TISGetInputSourceProperty(source: InputSourceRef, property_key: CFStringRef) -> CFDataRef;
+    static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
+    fn UCKeyTranslate(
+        layout: *const UCKeyboardLayout,
+        virtual_key_code: u16,
+        key_action: u16,
+        modifier_key_state: u32,
+        keyboard_type: u32,
+        key_translate_options: u32,
+        dead_key_state: *mut u32,
+        max_string_length: UniCharCount,
+        actual_string_length: *mut UniCharCount,
+        unicode_string: *mut UniChar,
+    ) -> u32;
+    fn LMGetKbdType() -> u8;
 }
 
 thread_local! {
@@ -164,9 +202,118 @@ struct GlobalHotKeyState {
     hotkey_ref: Option<usize>,
 }
 
-fn keycode_to_macos_vkey(key: &KeyCode) -> Option<u32> {
+fn translated_layout_text(vkey: u16, modifier_flags: NSEventModifierFlags) -> Option<String> {
+    let input_source = unsafe { TISCopyCurrentKeyboardInputSource() };
+    if input_source.is_null() {
+        return None;
+    }
+    let input_source = unsafe { InputSource::wrap_under_create_rule(input_source) };
+
+    let layout_data = unsafe {
+        let data = TISGetInputSourceProperty(
+            input_source.as_concrete_TypeRef(),
+            kTISPropertyUnicodeKeyLayoutData,
+        );
+        if data.is_null() {
+            return None;
+        }
+        CFData::wrap_under_get_rule(data)
+    };
+
+    let layout =
+        unsafe { CFDataGetBytePtr(layout_data.as_concrete_TypeRef()) as *const UCKeyboardLayout };
+    if layout.is_null() {
+        return None;
+    }
+
+    let modifier_key_state = (modifier_flags.bits() >> 16) as u32 & 0xFF;
+    #[allow(non_upper_case_globals)]
+    const kUCKeyTranslateNoDeadKeysBit: u32 = 0;
+
+    let mut unicode_buffer = [0u16; 8];
+    let mut length = 0;
+    let mut dead_key_state = 0;
+    let status = unsafe {
+        UCKeyTranslate(
+            layout,
+            vkey,
+            kUCKeyActionDisplay,
+            modifier_key_state,
+            LMGetKbdType() as u32,
+            1 << kUCKeyTranslateNoDeadKeysBit,
+            &mut dead_key_state,
+            unicode_buffer.len() as UniCharCount,
+            &mut length,
+            unicode_buffer.as_mut_ptr(),
+        )
+    };
+    if status != 0 || length == 0 {
+        return None;
+    }
+
+    String::from_utf16(unsafe {
+        std::slice::from_raw_parts(unicode_buffer.as_ptr(), length as usize)
+    })
+    .ok()
+}
+
+fn layout_translation_modifier_flags(mods: Modifiers) -> NSEventModifierFlags {
+    let mut flags = NSEventModifierFlags::empty();
+    if mods.intersects(Modifiers::SHIFT | Modifiers::LEFT_SHIFT | Modifiers::RIGHT_SHIFT) {
+        flags |= NSEventModifierFlags::NSShiftKeyMask;
+    }
+    if mods.intersects(Modifiers::ALT | Modifiers::LEFT_ALT | Modifiers::RIGHT_ALT) {
+        flags |= NSEventModifierFlags::NSAlternateKeyMask;
+    }
+    flags
+}
+
+fn mapped_char_to_macos_vkey(target: char, mods: Modifiers) -> Option<u32> {
+    let target = if target.is_ascii_alphabetic() {
+        target.to_ascii_lowercase()
+    } else {
+        target
+    };
+    let modifier_flags = layout_translation_modifier_flags(mods);
+
+    for &vkey in layout_printable_vkeys() {
+        let Some(text) = translated_layout_text(vkey, modifier_flags) else {
+            continue;
+        };
+        let mut chars = text.chars();
+        let Some(candidate) = chars.next() else {
+            continue;
+        };
+        if chars.next().is_some() {
+            continue;
+        }
+
+        let matches = if target.is_ascii_alphabetic() {
+            candidate.to_ascii_lowercase() == target
+        } else {
+            candidate == target
+        };
+        if matches {
+            return Some(u32::from(vkey));
+        }
+    }
+
+    None
+}
+
+fn keycode_to_macos_vkey(key: &KeyCode, mods: Modifiers) -> Option<u32> {
     match key {
         KeyCode::RawCode(raw) => u16::try_from(*raw).ok().map(u32::from),
+        KeyCode::Char(c) => mapped_char_to_macos_vkey(*c, mods)
+            .or_else(|| key.to_phys().and_then(phys_to_vkey).map(u32::from)),
+        KeyCode::Composed(text) => {
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => mapped_char_to_macos_vkey(c, mods)
+                    .or_else(|| key.to_phys().and_then(phys_to_vkey).map(u32::from)),
+                _ => key.to_phys().and_then(phys_to_vkey).map(u32::from),
+            }
+        }
         _ => key.to_phys().and_then(phys_to_vkey).map(u32::from),
     }
 }
@@ -193,7 +340,7 @@ fn configured_global_hotkey() -> Option<(u32, u32)> {
     let config = config::configuration();
     let hotkey = config.macos_global_hotkey.clone()?;
     let key = hotkey.key.resolve(config.key_map_preference);
-    let Some(vkey) = keycode_to_macos_vkey(&key) else {
+    let Some(vkey) = keycode_to_macos_vkey(&key, hotkey.mods) else {
         log::warn!("macos_global_hotkey key {key:?} cannot be mapped to a macOS virtual key");
         return None;
     };
@@ -492,6 +639,16 @@ extern "C" fn application_did_finish_launching(this: &mut Object, _sel: Sel, _no
             object: nil
         ];
         log::debug!("registered for NSApplicationDidChangeScreenParametersNotification");
+
+        let keyboard_notification_name =
+            nsstring("NSTextInputContextKeyboardSelectionDidChangeNotification");
+        let () = msg_send![app_notification_center,
+            addObserver: this as *mut Object
+            selector: sel!(keyboardSelectionDidChange:)
+            name: *keyboard_notification_name
+            object: nil
+        ];
+        log::debug!("registered for NSTextInputContextKeyboardSelectionDidChangeNotification");
     }
     sync_global_hotkey_registration();
 }
@@ -550,6 +707,45 @@ extern "C" fn screen_parameters_did_change(
         "screen parameter change",
         DISPLAY_CHANGE_MAX_RETRIES,
     );
+}
+
+extern "C" fn keyboard_selection_did_change(
+    _self: &mut Object,
+    _sel: Sel,
+    _notification: *mut Object,
+) {
+    log::debug!(
+        "NSTextInputContextKeyboardSelectionDidChangeNotification received, syncing global hotkey"
+    );
+    sync_global_hotkey_registration();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_translation_modifier_flags_include_shift_and_option() {
+        let flags = layout_translation_modifier_flags(Modifiers::SHIFT | Modifiers::ALT);
+
+        assert!(flags.contains(NSEventModifierFlags::NSShiftKeyMask));
+        assert!(flags.contains(NSEventModifierFlags::NSAlternateKeyMask));
+    }
+
+    #[test]
+    fn layout_translation_modifier_flags_accept_positional_option_bits() {
+        let flags = layout_translation_modifier_flags(Modifiers::LEFT_ALT | Modifiers::RIGHT_SHIFT);
+
+        assert!(flags.contains(NSEventModifierFlags::NSAlternateKeyMask));
+        assert!(flags.contains(NSEventModifierFlags::NSShiftKeyMask));
+    }
+
+    #[test]
+    fn layout_translation_modifier_flags_ignore_non_text_modifiers() {
+        let flags = layout_translation_modifier_flags(Modifiers::CTRL | Modifiers::SUPER);
+
+        assert_eq!(flags, NSEventModifierFlags::empty());
+    }
 }
 
 extern "C" fn application_open_untitled_file(
@@ -1008,6 +1204,10 @@ fn get_class() -> &'static Class {
             cls.add_method(
                 sel!(screenParametersDidChange:),
                 screen_parameters_did_change as extern "C" fn(&mut Object, Sel, *mut Object),
+            );
+            cls.add_method(
+                sel!(keyboardSelectionDidChange:),
+                keyboard_selection_did_change as extern "C" fn(&mut Object, Sel, *mut Object),
             );
         }
 
