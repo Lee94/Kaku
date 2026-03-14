@@ -70,7 +70,9 @@ else
     echo "Total highlight entries: $count"
 
     if [[ $count -lt 2 ]]; then
-        echo "Warning: at least 2 highlight entries are recommended"
+        echo "Error: at least 2 highlight entries are required for version $current_config_version"
+        echo "Add matching English and Chinese entries to $HIGHLIGHTS_FILE"
+        exit 1
     fi
 fi
 

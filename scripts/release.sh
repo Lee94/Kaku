@@ -58,6 +58,10 @@ is_valid_team_id() {
     [[ "$1" =~ ^[A-Z0-9]{10}$ ]]
 }
 
+is_developer_id_application_identity() {
+    [[ "$1" == Developer\ ID\ Application:* ]]
+}
+
 # Detect version from Cargo.toml if not provided
 get_cargo_version() {
     grep '^version =' "$REPO_ROOT/kaku/Cargo.toml" | head -n1 | cut -d'"' -f2
@@ -144,6 +148,9 @@ check_gh_auth() {
 # Detect Developer ID from Keychain if not set
 detect_signing_identity() {
     if [[ -n "${KAKU_SIGNING_IDENTITY:-}" ]]; then
+        if ! is_developer_id_application_identity "$KAKU_SIGNING_IDENTITY"; then
+            die "KAKU_SIGNING_IDENTITY must be a Developer ID Application certificate, got: $KAKU_SIGNING_IDENTITY"
+        fi
         log_info "Using signing identity from environment: $KAKU_SIGNING_IDENTITY"
         return 0
     fi

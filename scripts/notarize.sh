@@ -35,6 +35,29 @@ is_valid_team_id() {
 	[[ "$1" =~ ^[A-Z0-9]{10}$ ]]
 }
 
+require_developer_id_signature() {
+	local metadata
+	local signed_team_id
+
+	metadata=$(codesign -dv "$APP_BUNDLE" 2>&1) || {
+		echo "Error: failed to inspect app signature." >&2
+		return 1
+	}
+
+	if ! grep -q "^Authority=Developer ID Application:" <<<"$metadata"; then
+		echo "Error: App must be signed with a Developer ID Application certificate before notarization." >&2
+		echo "$metadata" | grep -E "^(Authority=|TeamIdentifier=|Signature=)" >&2 || true
+		return 1
+	fi
+
+	signed_team_id=$(echo "$metadata" | awk -F= '/^TeamIdentifier=/{print $2; exit}')
+	if ! is_valid_team_id "$signed_team_id"; then
+		echo "Error: App signature does not contain a valid TeamIdentifier." >&2
+		echo "$metadata" | grep -E "^(Authority=|TeamIdentifier=|Signature=)" >&2 || true
+		return 1
+	fi
+}
+
 # Check if app exists
 if [[ ! -d "$APP_BUNDLE" ]]; then
 	echo "Error: $APP_BUNDLE not found. Run ./scripts/build.sh first."
@@ -46,6 +69,8 @@ if ! codesign -v "$APP_BUNDLE" 2>/dev/null; then
 	echo "Error: App is not signed. Run build with KAKU_SIGNING_IDENTITY set."
 	exit 1
 fi
+
+require_developer_id_signature || exit 1
 
 echo "App: $APP_BUNDLE"
 echo "DMG: $DMG_PATH"
