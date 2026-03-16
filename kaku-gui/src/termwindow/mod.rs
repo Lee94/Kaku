@@ -4379,11 +4379,11 @@ impl TermWindow {
 
         #[cfg(target_os = "macos")]
         {
-            if target.path.is_file() && Self::try_open_text(&target.path)? {
+            if Self::try_open_path_with_default_app(&target.path)? {
                 return Ok(());
             }
 
-            if Self::try_open_path_with_default_app(&target.path)? {
+            if target.path.is_file() && Self::try_open_text(&target.path)? {
                 return Ok(());
             }
 
