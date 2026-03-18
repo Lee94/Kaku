@@ -1166,11 +1166,10 @@ impl TermWindow {
             .contains(WindowState::FULL_SCREEN)
     }
 
-    /// Returns true when the window fills the screen edge-to-edge (maximized
-    /// or fullscreen). Used to eliminate bottom padding so terminal content
-    /// fills to the window bottom.
-    pub(crate) fn layout_is_edge_to_edge(&self) -> bool {
-        self.window_state.contains(WindowState::MAXIMIZED) || self.layout_is_effective_fullscreen()
+    /// Fullscreen should keep the historical V0.7.1 padding behavior.
+    /// Only maximized windows opt into the newer edge-to-edge padding path.
+    pub(crate) fn layout_uses_edge_to_edge_padding(&self) -> bool {
+        self.window_state.contains(WindowState::MAXIMIZED)
     }
 
     fn schedule_deferred_layout_relayout(&mut self, window: &Window) {
@@ -2530,7 +2529,7 @@ impl TermWindow {
             self.show_tab_bar,
             self.config.tab_bar_at_bottom,
             tab_bar_height,
-            self.layout_is_edge_to_edge(),
+            self.layout_uses_edge_to_edge_padding(),
         )
     }
 

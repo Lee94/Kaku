@@ -237,6 +237,10 @@ pub struct ComputeCellFgBgResult {
     pub cursor_shape: Option<CursorShape>,
 }
 
+fn edge_to_edge_top_gap(vertical_gap: f32, border_top: f32, border_bottom: f32) -> f32 {
+    (vertical_gap - border_top - border_bottom).max(0.)
+}
+
 /// Basic cache of computed data from prior cluster to avoid doing the same
 /// work for space separated clusters with the same style
 #[derive(Clone, Debug)]
@@ -409,11 +413,13 @@ impl crate::TermWindow {
             HorizontalWindowContentAlignment::Center => (horizontal_gap / 2.).round(),
             HorizontalWindowContentAlignment::Right => horizontal_gap,
         };
-        let top_gap = if self.layout_is_edge_to_edge() {
-            // When maximized/fullscreen, push the quantization slack to the top
-            // so terminal content fills to the window bottom edge.
+        let top_gap = if self.layout_uses_edge_to_edge_padding() {
             let border = self.get_os_border();
-            (vertical_gap - border.top.get() as f32 - border.bottom.get() as f32).max(0.)
+            edge_to_edge_top_gap(
+                vertical_gap,
+                border.top.get() as f32,
+                border.bottom.get() as f32,
+            )
         } else {
             match self.config.window_content_alignment.vertical {
                 VerticalWindowContentAlignment::Top => 0.,
@@ -963,6 +969,16 @@ impl crate::TermWindow {
 
         self.line_state_cache.borrow_mut().put(id, state);
         shape_hash
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_to_edge_top_gap;
+
+    #[test]
+    fn edge_to_edge_top_gap_excludes_os_borders() {
+        assert_eq!(edge_to_edge_top_gap(18.0, 2.0, 2.0), 14.0);
     }
 }
 

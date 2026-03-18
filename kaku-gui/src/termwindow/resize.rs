@@ -40,8 +40,9 @@ fn should_rebalance_top_tab_visible_bottom_gap(
     user_has_custom_padding: bool,
     show_tab_bar: bool,
     tab_bar_at_bottom: bool,
+    is_fullscreen: bool,
 ) -> bool {
-    !user_has_custom_padding && show_tab_bar && !tab_bar_at_bottom
+    !user_has_custom_padding && show_tab_bar && !tab_bar_at_bottom && !is_fullscreen
 }
 
 fn should_rebalance_bottom_tab_quantization_slack(
@@ -331,7 +332,7 @@ impl super::TermWindow {
         // change to the tab size.
 
         let config = &self.config;
-        let is_edge_to_edge = self.layout_is_edge_to_edge();
+        let uses_edge_to_edge_padding = self.layout_uses_edge_to_edge_padding();
         let user_has_custom_padding = user_has_custom_window_padding_assignment();
 
         let tab_bar_height = if self.show_tab_bar {
@@ -374,7 +375,7 @@ impl super::TermWindow {
                 self.show_tab_bar,
                 self.config.tab_bar_at_bottom,
                 tab_bar_height_px,
-                is_edge_to_edge,
+                uses_edge_to_edge_padding,
                 user_has_custom_padding,
             );
             let padding_right = effective_right_padding(&config, h_context);
@@ -426,7 +427,7 @@ impl super::TermWindow {
                 self.show_tab_bar,
                 self.config.tab_bar_at_bottom,
                 tab_bar_height_px,
-                is_edge_to_edge,
+                uses_edge_to_edge_padding,
                 user_has_custom_padding,
             );
             let padding_right = effective_right_padding(&config, h_context);
@@ -451,6 +452,7 @@ impl super::TermWindow {
                 user_has_custom_padding,
                 self.show_tab_bar,
                 self.config.tab_bar_at_bottom,
+                self.layout_is_effective_fullscreen(),
             ) {
                 let row_quantization_slack = avail_height.saturating_sub(rows * cell_height);
                 let (rebalanced_top, _) = rebalance_top_padding_for_bottom_gap(
@@ -746,7 +748,7 @@ impl super::TermWindow {
             show_tab_bar,
             config.tab_bar_at_bottom,
             tab_bar_height,
-            self.layout_is_edge_to_edge(),
+            self.layout_uses_edge_to_edge_padding(),
         );
 
         let dimensions = Dimensions {
@@ -1425,15 +1427,19 @@ mod tests {
             false, // managed padding
             true,  // tab bar visible
             false, // top-tab
+            false, // not fullscreen
         ));
         assert!(!should_rebalance_top_tab_visible_bottom_gap(
-            true, true, false
+            true, true, false, false
         ));
         assert!(!should_rebalance_top_tab_visible_bottom_gap(
-            false, false, false
+            false, false, false, false
         ));
         assert!(!should_rebalance_top_tab_visible_bottom_gap(
-            false, true, true
+            false, true, true, false
+        ));
+        assert!(!should_rebalance_top_tab_visible_bottom_gap(
+            false, true, false, true
         ));
     }
 
