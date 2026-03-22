@@ -14,7 +14,8 @@
 4. **Update & Doctor in Tabs**: `kaku update` and `kaku doctor` now open in a dedicated tab instead of blocking the current session.
 5. **Basename-only Tab Titles**: New `tab_title_basename_only` option to show just the directory name instead of the full path.
 6. **Scrollback Fix**: Fixed viewport jumping to top during rapid output, and snapping to bottom after scrolling up.
-7. **Bug Fixes & Stability**: Fixed window closing instead of hiding, Cmd+Click links, clipboard image paste, OpenGL flush on sleep/wake, emoji width, SSH alias conflicts in zsh, and viewport jumping when using Claude Code. Close dialogs now support Enter to confirm and Esc to cancel.
+7. **Bug Fixes**: Fixed window hide, Cmd+Click links, clipboard paste, emoji width, SSH alias conflicts, and viewport jumping with Claude Code.
+8. **Close Dialog Shortcuts**: Close confirmation dialogs now support Enter to confirm and Esc to cancel.
 
 ### 更新日志
 
@@ -24,7 +25,8 @@
 4. **Update/Doctor 在标签中运行**：`kaku update` 和 `kaku doctor` 在独立标签中打开，不阻塞当前会话。
 5. **仅显示目录名标签**：新增 `tab_title_basename_only` 选项，只显示目录名而非完整路径。
 6. **滚动修复**：修复快速输出时 viewport 跳到顶部，以及往上滚动后自动跳回底部的问题。
-7. **Bug 修复与稳定性**：修复窗口实际关闭而非隐藏、Cmd+Click 链接打开、剪贴板图片粘贴、sleep/wake 时 OpenGL flush、emoji 宽度渲染、zsh 中 SSH alias 冲突，以及使用 Claude Code 时 viewport 异常跳动的问题。关闭确认弹窗现支持回车确认、Esc 取消。
+7. **Bug 修复**：修复窗口隐藏、Cmd+Click 链接、剪贴板粘贴、emoji 宽度、SSH alias 冲突，以及 Claude Code 使用时 viewport 异常跳动的问题。
+8. **关闭弹窗快捷键**：关闭确认弹窗现支持回车确认、Esc 取消。
 
 Special thanks to @mystersu, @ddotz, @rookie-ricardo, @s010s, @anzksdk, @cynosurech, and @XinCao for their contributions to this release.
 
