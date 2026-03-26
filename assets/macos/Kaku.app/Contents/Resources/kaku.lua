@@ -103,6 +103,7 @@ end
 local user_has_custom_padding = false
 local user_has_custom_font = false
 local user_has_custom_font_rules = false
+local user_has_custom_window_frame = false
 local remember_last_cwd = true
 
 local function check_user_custom_config()
@@ -126,6 +127,9 @@ local function check_user_custom_config()
       end
       if trimmed:match('^config%.font_rules%s*=') then
         user_has_custom_font_rules = true
+      end
+      if trimmed:match('^config%.window_frame%s*=') then
+        user_has_custom_window_frame = true
       end
       if trimmed:match('^config%.remember_last_cwd%s*=%s*false') then
         remember_last_cwd = false
@@ -155,7 +159,7 @@ local function resolve_kaku_color_scheme(scheme)
     return resolve_appearance_color_scheme()
   end
   if not scheme or scheme == '' then
-    return 'Kaku Dark'
+    return resolve_appearance_color_scheme()
   end
   return scheme
 end
@@ -2439,6 +2443,19 @@ local function tab_path_parts(tab)
   return parent, current
 end
 
+local function pane_process_tab_title(pane)
+  if not pane or is_shell_foreground(pane) then
+    return ''
+  end
+
+  local proc_name = basename(pane_foreground_process_name(pane) or '')
+  if proc_name == '' or proc_name:lower() == 'ssh' then
+    return ''
+  end
+
+  return proc_name
+end
+
 -- ===== Kaku Palette =====
 local KAKU_BLACK = '#15141b'
 local KAKU_ANSI_BLACK = '#110f18'
@@ -2525,6 +2542,10 @@ wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, m
 
   -- Use user-set tab title if available
   local text = tab.tab_title or ''
+  local active_pane = tab.active_pane
+  if text == '' and active_pane then
+    text = pane_process_tab_title(active_pane)
+  end
   if text == '' then
     local parent, current = tab_path_parts(tab)
     local basename_only = effective_config and effective_config.tab_title_show_basename_only
@@ -2534,10 +2555,9 @@ wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, m
     end
   end
 
-  -- Guard active_pane nil before accessing .title / .is_zoomed
-  local active_pane = tab.active_pane
   if text == '' and active_pane then
-    text = active_pane.title
+    text = resolve_remote_target_from_pane(active_pane)
+      or trim_surrounding_whitespace(active_pane.title or '')
   end
   if active_pane and active_pane.is_zoomed then
     text = text .. ' [Z]'
@@ -2931,7 +2951,8 @@ local function is_user_light_theme()
     end
   end
   file:close()
-  return false
+  -- No explicit theme selection means the bundled default should track macOS.
+  return resolve_appearance_color_scheme() == 'Kaku Light'
 end
 
 -- Only seed the managed default font stack when the user hasn't overridden it.
@@ -2950,12 +2971,49 @@ end
 -- Track last font theme per window to avoid redundant overrides
 local window_font_theme = setmetatable({}, { __mode = 'k' })
 local window_has_managed_font_override = setmetatable({}, { __mode = 'k' })
+local window_has_managed_window_frame_override = setmetatable({}, { __mode = 'k' })
+local get_window_frame_colors
+
+local function copy_table(source)
+  local copy = {}
+  if type(source) ~= 'table' then
+    return copy
+  end
+
+  for key, value in pairs(source) do
+    copy[key] = value
+  end
+  return copy
+end
+
+local function build_managed_window_frame(scheme)
+  local frame = copy_table(config.window_frame)
+  local colors = get_window_frame_colors(scheme)
+  frame.active_titlebar_bg = colors.active_titlebar_bg
+  frame.inactive_titlebar_bg = colors.inactive_titlebar_bg
+  frame.active_titlebar_fg = colors.active_titlebar_fg
+  frame.inactive_titlebar_fg = colors.inactive_titlebar_fg
+  return frame
+end
+
+local function window_frame_matches_theme(frame, scheme)
+  if type(frame) ~= 'table' then
+    return false
+  end
+
+  local colors = get_window_frame_colors(scheme)
+  return frame.active_titlebar_bg == colors.active_titlebar_bg
+    and frame.inactive_titlebar_bg == colors.inactive_titlebar_bg
+    and frame.active_titlebar_fg == colors.active_titlebar_fg
+    and frame.inactive_titlebar_fg == colors.inactive_titlebar_fg
+end
 
 -- Dynamically switch font weight when theme changes
 wezterm.on('window-config-reloaded', function(window, pane)
   local overrides = window:get_config_overrides() or {}
   local scheme = resolve_kaku_color_scheme(overrides.color_scheme or config.color_scheme)
   local is_light = scheme == 'Kaku Light'
+  local overrides_changed = false
 
   if user_has_custom_font or user_has_custom_font_rules then
     window_font_theme[window] = nil
@@ -2963,7 +3021,7 @@ wezterm.on('window-config-reloaded', function(window, pane)
       and (overrides.font ~= nil or overrides.font_rules ~= nil) then
       overrides.font = nil
       overrides.font_rules = nil
-      window:set_config_overrides(overrides)
+      overrides_changed = true
     end
     window_has_managed_font_override[window] = nil
   elseif window_font_theme[window] ~= is_light then
@@ -2973,6 +3031,27 @@ wezterm.on('window-config-reloaded', function(window, pane)
     overrides.font = font
     overrides.font_rules = font_rules
     window_has_managed_font_override[window] = true
+    overrides_changed = true
+  end
+
+  if user_has_custom_window_frame then
+    if window_has_managed_window_frame_override[window] and overrides.window_frame ~= nil then
+      overrides.window_frame = nil
+      overrides_changed = true
+    end
+    window_has_managed_window_frame_override[window] = nil
+  else
+    local effective_window_frame = overrides.window_frame or config.window_frame
+    if not window_frame_matches_theme(effective_window_frame, scheme) then
+      overrides.window_frame = build_managed_window_frame(scheme)
+      window_has_managed_window_frame_override[window] = true
+      overrides_changed = true
+    else
+      window_has_managed_window_frame_override[window] = overrides.window_frame ~= nil
+    end
+  end
+
+  if overrides_changed then
     window:set_config_overrides(overrides)
   end
 
@@ -3238,22 +3317,36 @@ config.color_schemes['Kaku Theme'] = kaku_theme
 config.color_scheme = resolve_kaku_color_scheme(config.color_scheme)
 
 -- ===== Window Frame (theme-aware) =====
-local function get_window_frame_colors()
-  local scheme = resolve_kaku_color_scheme(config.color_scheme)
+get_window_frame_colors = function(scheme)
+  scheme = resolve_kaku_color_scheme(scheme)
   if scheme == 'Kaku Light' then
-    return '#FFFCF0', '#FFFCF0'
+    return {
+      active_titlebar_bg = '#FFFCF0',
+      inactive_titlebar_bg = '#FFFCF0',
+      active_titlebar_fg = '#100F0F',
+      inactive_titlebar_fg = '#575653',
+    }
   else
-    return KAKU_BLACK, KAKU_BLACK
+    return {
+      active_titlebar_bg = KAKU_BLACK,
+      inactive_titlebar_bg = KAKU_BLACK,
+      active_titlebar_fg = KAKU_WHITE,
+      inactive_titlebar_fg = KAKU_GRAY,
+    }
   end
 end
 
-local active_titlebar_bg, inactive_titlebar_bg = get_window_frame_colors()
-config.window_frame = {
-  font = wezterm.font({ family = 'JetBrains Mono', weight = 'Regular' }),
-  font_size = 13.0,
-  active_titlebar_bg = active_titlebar_bg,
-  inactive_titlebar_bg = inactive_titlebar_bg,
-}
+if not user_has_custom_window_frame then
+  local window_frame_colors = get_window_frame_colors(config.color_scheme)
+  config.window_frame = {
+    font = wezterm.font({ family = 'JetBrains Mono', weight = 'Regular' }),
+    font_size = 13.0,
+    active_titlebar_bg = window_frame_colors.active_titlebar_bg,
+    inactive_titlebar_bg = window_frame_colors.inactive_titlebar_bg,
+    active_titlebar_fg = window_frame_colors.active_titlebar_fg,
+    inactive_titlebar_fg = window_frame_colors.inactive_titlebar_fg,
+  }
+end
 
 -- ===== Shell =====
 local user_shell = os.getenv('SHELL')

@@ -260,8 +260,8 @@ impl App {
                 key: "Theme",
                 lua_key: "color_scheme",
                 value: String::new(),
-                default: "Kaku Dark".into(),
-                options: vec!["Kaku Dark", "Kaku Light", "Auto"],
+                default: "Auto".into(),
+                options: vec!["Auto", "Kaku Dark", "Kaku Light"],
                 skip_write: false,
             },
             ConfigField {
@@ -1336,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn color_scheme_defaults_to_dark() {
+    fn color_scheme_defaults_to_auto() {
         let app = test_app();
         let field = app
             .fields
@@ -1344,7 +1344,7 @@ mod tests {
             .find(|f| f.lua_key == "color_scheme")
             .expect("color_scheme field to exist");
 
-        assert_eq!(field.default, "Kaku Dark");
+        assert_eq!(field.default, "Auto");
     }
 
     #[test]
@@ -1590,7 +1590,7 @@ mod tests {
             app.dirty,
             "ESC in Selecting mode should commit the selection"
         );
-        assert_eq!(app.fields[idx].value, "Kaku Light");
+        assert_eq!(app.fields[idx].value, "Kaku Dark");
     }
 
     #[test]

@@ -929,6 +929,20 @@ mod tests {
         let path = effective_config_file_path_from(None, None, PathBuf::from("/default/kaku.lua"));
         assert_eq!(path, PathBuf::from("/default/kaku.lua"));
     }
+
+    #[test]
+    fn bundled_kaku_lua_defaults_missing_theme_to_appearance() {
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../assets/macos/Kaku.app/Contents/Resources/kaku.lua");
+        let content = std::fs::read_to_string(&bundled).expect("read bundled kaku.lua");
+
+        assert!(
+            content.contains(
+                "if not scheme or scheme == '' then\n    return resolve_appearance_color_scheme()"
+            ),
+            "bundled kaku.lua should resolve a missing color_scheme via appearance"
+        );
+    }
 }
 
 pub fn set_config_file_override(path: &Path) {
