@@ -2900,14 +2900,9 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
                     .first()
                     .copied()
                     .unwrap_or_else(|| cfg.model());
-                KakuAssistantConfig::new(
-                    cfg.is_enabled(),
-                    cfg.api_key(),
-                    new_model,
-                    new_base_url,
-                )
-                .with_provider(provider_name)
-                .with_custom_headers(cfg.custom_headers().to_vec())
+                KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), new_model, new_base_url)
+                    .with_provider(provider_name)
+                    .with_custom_headers(cfg.custom_headers().to_vec())
             } else {
                 return Ok(());
             }
@@ -6306,16 +6301,24 @@ provider = "managed:kimi-code"
         let fields = extract_kaku_assistant_fields(
             "enabled = true\nprovider = \"MiniMax\"\napi_key = \"sk-test\"\nmodel = \"MiniMax-M2.7\"\nbase_url = \"https://api.minimax.io/v1\"\n",
         );
-        let provider = fields.iter().find(|f| f.key == "Provider").expect("Provider field");
+        let provider = fields
+            .iter()
+            .find(|f| f.key == "Provider")
+            .expect("Provider field");
         assert_eq!(provider.value, "MiniMax");
         assert!(provider.options.contains(&"MiniMax".to_string()));
         assert!(provider.options.contains(&"VivGrid".to_string()));
         assert!(provider.options.contains(&"Custom".to_string()));
 
-        let model = fields.iter().find(|f| f.key == "Model").expect("Model field");
+        let model = fields
+            .iter()
+            .find(|f| f.key == "Model")
+            .expect("Model field");
         assert_eq!(model.value, "MiniMax-M2.7");
         assert!(model.options.contains(&"MiniMax-M2.7".to_string()));
-        assert!(model.options.contains(&"MiniMax-M2.7-highspeed".to_string()));
+        assert!(model
+            .options
+            .contains(&"MiniMax-M2.7-highspeed".to_string()));
     }
 
     #[test]
@@ -6323,14 +6326,20 @@ provider = "managed:kimi-code"
         let fields = extract_kaku_assistant_fields(
             "enabled = true\nmodel = \"MiniMax-M2.7\"\nbase_url = \"https://api.minimax.io/v1\"\n",
         );
-        let provider = fields.iter().find(|f| f.key == "Provider").expect("Provider field");
+        let provider = fields
+            .iter()
+            .find(|f| f.key == "Provider")
+            .expect("Provider field");
         assert_eq!(provider.value, "MiniMax");
     }
 
     #[test]
     fn kaku_assistant_provider_defaults_to_vivgrid() {
         let fields = extract_kaku_assistant_fields("enabled = true\n");
-        let provider = fields.iter().find(|f| f.key == "Provider").expect("Provider field");
+        let provider = fields
+            .iter()
+            .find(|f| f.key == "Provider")
+            .expect("Provider field");
         assert_eq!(provider.value, "VivGrid");
     }
 
@@ -6339,11 +6348,20 @@ provider = "managed:kimi-code"
         let fields = extract_kaku_assistant_fields(
             "enabled = true\nbase_url = \"https://my-proxy.example.com/v1\"\n",
         );
-        let provider = fields.iter().find(|f| f.key == "Provider").expect("Provider field");
+        let provider = fields
+            .iter()
+            .find(|f| f.key == "Provider")
+            .expect("Provider field");
         assert_eq!(provider.value, "Custom");
 
-        let model = fields.iter().find(|f| f.key == "Model").expect("Model field");
-        assert!(model.options.is_empty(), "Custom provider should have no model presets");
+        let model = fields
+            .iter()
+            .find(|f| f.key == "Model")
+            .expect("Model field");
+        assert!(
+            model.options.is_empty(),
+            "Custom provider should have no model presets"
+        );
     }
 
     #[test]
@@ -6386,7 +6404,10 @@ provider = "managed:kimi-code"
         let path = dir.path().join("assistant.toml");
         write_kaku_assistant_config(&path, &cfg).expect("write config");
         let saved = std::fs::read_to_string(&path).expect("read saved");
-        assert!(!saved.contains("provider ="), "provider must not be written to TOML");
+        assert!(
+            !saved.contains("provider ="),
+            "provider must not be written to TOML"
+        );
         assert!(saved.contains("custom_headers = [\"X-Foo: bar\"]"));
     }
 

@@ -62,7 +62,10 @@ pub fn provider_preset(name: &str) -> Option<&'static ProviderPreset> {
 
 /// Returns all provider preset names as a `Vec<String>`.
 pub fn provider_names() -> Vec<String> {
-    PROVIDER_PRESETS.iter().map(|p| p.name.to_string()).collect()
+    PROVIDER_PRESETS
+        .iter()
+        .map(|p| p.name.to_string())
+        .collect()
 }
 
 /// Detects the provider name from a base URL.
