@@ -394,7 +394,7 @@ impl CommandDef {
         fn is_rare_action(action: &KeyAssignment) -> bool {
             matches!(
                 action,
-                ShowDebugOverlay | OpenUri(_) | ScrollToTop | ScrollToBottom | ToggleAlwaysOnBottom
+                ShowDebugOverlay | OpenUri(_) | ScrollToTop | ScrollToBottom
             )
         }
 
@@ -740,6 +740,8 @@ impl CommandDef {
                 "Window" => match action {
                     Hide => 10,
                     ToggleFullScreen => 12,
+                    ToggleAlwaysOnTop => 13,
+                    ToggleAlwaysOnBottom => 14,
                     ActivateWindowRelative(-1) => 20,
                     ActivateWindowRelative(1) => 21,
                     ActivateWindow(_) => 22,
@@ -2555,6 +2557,8 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         // ----------------- Window
         ToggleFullScreen,
         Hide,
+        ToggleAlwaysOnTop,
+        ToggleAlwaysOnBottom,
         Search(Pattern::CurrentSelectionOrEmptyString),
         PaneSelect(PaneSelectArguments {
             alphabet: String::new(),

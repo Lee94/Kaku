@@ -16,6 +16,72 @@ pub const DEFAULT_MODEL: &str = "DeepSeek-V3.2";
 /// Default API base URL for the AI service.
 pub const DEFAULT_BASE_URL: &str = "https://api.vivgrid.com/v1";
 
+/// A provider preset with its API base URL and available models.
+pub struct ProviderPreset {
+    /// Display name for the provider.
+    pub name: &'static str,
+    /// Base URL for the provider's OpenAI-compatible API.
+    pub base_url: &'static str,
+    /// Available model identifiers for this provider (empty = free-text).
+    pub models: &'static [&'static str],
+}
+
+/// Built-in provider presets for the Kaku Assistant.
+pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
+    ProviderPreset {
+        name: "VivGrid",
+        base_url: "https://api.vivgrid.com/v1",
+        models: &["DeepSeek-V3.2"],
+    },
+    ProviderPreset {
+        name: "MiniMax",
+        base_url: "https://api.minimax.io/v1",
+        models: &[
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5",
+            "MiniMax-M2.5-highspeed",
+        ],
+    },
+    ProviderPreset {
+        name: "OpenAI",
+        base_url: "https://api.openai.com/v1",
+        models: &[],
+    },
+    ProviderPreset {
+        name: "Custom",
+        base_url: "",
+        models: &[],
+    },
+];
+
+/// Returns the provider preset matching the given name, if any.
+pub fn provider_preset(name: &str) -> Option<&'static ProviderPreset> {
+    PROVIDER_PRESETS.iter().find(|p| p.name == name)
+}
+
+/// Returns all provider preset names as a `Vec<String>`.
+pub fn provider_names() -> Vec<String> {
+    PROVIDER_PRESETS
+        .iter()
+        .map(|p| p.name.to_string())
+        .collect()
+}
+
+/// Detects the provider name from a base URL.
+///
+/// Returns the matching preset name if the base URL matches a known provider,
+/// or `"Custom"` otherwise.
+pub fn detect_provider(base_url: &str) -> &'static str {
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    for preset in PROVIDER_PRESETS {
+        if !preset.base_url.is_empty() && normalized == preset.base_url.trim_end_matches('/') {
+            return preset.name;
+        }
+    }
+    "Custom"
+}
+
 /// Returns the path to the assistant.toml configuration file.
 ///
 /// The file is located in the same directory as the user's Kaku config,
@@ -111,7 +177,7 @@ pub fn default_assistant_toml_template() -> String {
 #\n\
 # enabled: true enables command analysis suggestions; false disables requests.\n\
 # api_key: provider API key, example: \"sk-xxxx\".\n\
-# model: model id, example: \"DeepSeek-V3.2\" or \"gpt-5-mini\".\n\
+# model: model id, example: \"DeepSeek-V3.2\" or \"MiniMax-M2.7\".\n\
 # base_url: chat-completions API root URL.\n\
 # custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n\
 #                 format: [\"Header-Name: value\", \"Another-Header: value\"]\n\
@@ -278,6 +344,42 @@ fn top_level_toml_has_key(content: &str, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detect_provider_matches_known_urls() {
+        assert_eq!(detect_provider("https://api.minimax.io/v1"), "MiniMax");
+        assert_eq!(detect_provider("https://api.minimax.io/v1/"), "MiniMax");
+        assert_eq!(detect_provider("https://api.vivgrid.com/v1"), "VivGrid");
+        assert_eq!(detect_provider("https://api.openai.com/v1"), "OpenAI");
+    }
+
+    #[test]
+    fn detect_provider_returns_custom_for_unknown_urls() {
+        assert_eq!(detect_provider("https://my-proxy.example.com/v1"), "Custom");
+        assert_eq!(detect_provider(""), "Custom");
+    }
+
+    #[test]
+    fn provider_preset_lookup_returns_correct_preset() {
+        let preset = provider_preset("MiniMax").expect("MiniMax preset");
+        assert_eq!(preset.base_url, "https://api.minimax.io/v1");
+        assert!(preset.models.contains(&"MiniMax-M2.7"));
+        assert!(preset.models.contains(&"MiniMax-M2.7-highspeed"));
+    }
+
+    #[test]
+    fn provider_preset_lookup_returns_none_for_unknown() {
+        assert!(provider_preset("UnknownProvider").is_none());
+    }
+
+    #[test]
+    fn provider_names_includes_all_presets() {
+        let names = provider_names();
+        assert!(names.contains(&"VivGrid".to_string()));
+        assert!(names.contains(&"MiniMax".to_string()));
+        assert!(names.contains(&"OpenAI".to_string()));
+        assert!(names.contains(&"Custom".to_string()));
+    }
 
     #[test]
     fn top_level_key_check_ignores_table_keys() {

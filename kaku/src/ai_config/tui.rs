@@ -2628,6 +2628,8 @@ struct KakuAssistantConfig {
     model: String,
     /// Base URL for the API endpoint (never empty, falls back to default)
     base_url: String,
+    /// Provider preset name (e.g. "VivGrid", "MiniMax", "OpenAI", "Custom")
+    provider: String,
     /// Optional extra request headers as `Name: Value`
     custom_headers: Vec<String>,
 }
@@ -2648,6 +2650,12 @@ impl KakuAssistantConfig {
     ) -> Self {
         let model = model.into();
         let base_url = base_url.into();
+        let resolved_base_url = if base_url.trim().is_empty() {
+            assistant_config::DEFAULT_BASE_URL.to_string()
+        } else {
+            base_url
+        };
+        let provider = assistant_config::detect_provider(&resolved_base_url).to_string();
         Self {
             enabled,
             api_key: api_key.into(),
@@ -2656,11 +2664,8 @@ impl KakuAssistantConfig {
             } else {
                 model
             },
-            base_url: if base_url.trim().is_empty() {
-                assistant_config::DEFAULT_BASE_URL.to_string()
-            } else {
-                base_url
-            },
+            base_url: resolved_base_url,
+            provider,
             custom_headers: vec![],
         }
     }
@@ -2688,6 +2693,15 @@ impl KakuAssistantConfig {
     /// Returns the base URL (never empty).
     fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = provider.into();
+        self
     }
 
     fn custom_headers(&self) -> &[String] {
@@ -2745,11 +2759,23 @@ fn get_kaku_assistant_api_key() -> Option<String> {
 
 fn extract_kaku_assistant_fields(raw: &str) -> Vec<FieldEntry> {
     let cfg = parse_kaku_assistant_config(raw);
+
+    // Resolve model options from the active provider preset
+    let model_options: Vec<String> = assistant_config::provider_preset(cfg.provider())
+        .map(|p| p.models.iter().map(|m| m.to_string()).collect())
+        .unwrap_or_default();
+
     vec![
+        FieldEntry {
+            key: "Provider".into(),
+            value: cfg.provider().to_string(),
+            options: assistant_config::provider_names(),
+            editable: true,
+        },
         FieldEntry {
             key: "Model".into(),
             value: cfg.model().to_string(),
-            options: vec![],
+            options: model_options,
             editable: true,
         },
         FieldEntry {
@@ -2778,7 +2804,7 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
         "# enabled: true enables command analysis suggestions; false disables requests.\n",
     );
     out.push_str("# api_key: provider API key, example: \"sk-xxxx\".\n");
-    out.push_str("# model: model id, example: \"DeepSeek-V3.2\" or \"gpt-5-mini\".\n");
+    out.push_str("# model: model id, example: \"DeepSeek-V3.2\" or \"MiniMax-M2.7\".\n");
     out.push_str("# base_url: chat-completions API root URL.\n");
     out.push_str(
         "# custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n",
@@ -2857,7 +2883,29 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
         "Enabled" => {
             let enabled = matches!(new_val.trim(), "On" | "on" | "true" | "1");
             KakuAssistantConfig::new(enabled, cfg.api_key(), cfg.model(), cfg.base_url())
+                .with_provider(cfg.provider())
                 .with_custom_headers(cfg.custom_headers().to_vec())
+        }
+        "Provider" => {
+            // When provider changes, auto-fill base_url and default model
+            let provider_name = new_val.trim();
+            if let Some(preset) = assistant_config::provider_preset(provider_name) {
+                let new_base_url = if preset.base_url.is_empty() {
+                    cfg.base_url()
+                } else {
+                    preset.base_url
+                };
+                let new_model = preset
+                    .models
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| cfg.model());
+                KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), new_model, new_base_url)
+                    .with_provider(provider_name)
+                    .with_custom_headers(cfg.custom_headers().to_vec())
+            } else {
+                return Ok(());
+            }
         }
         "Model" => {
             let model = if new_val.trim().is_empty() || new_val == "—" {
@@ -2866,6 +2914,7 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
                 new_val.trim()
             };
             KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), model, cfg.base_url())
+                .with_provider(cfg.provider())
                 .with_custom_headers(cfg.custom_headers().to_vec())
         }
         "Base URL" => {
@@ -2875,6 +2924,7 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
                 new_val.trim()
             };
             KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), cfg.model(), base_url)
+                .with_provider(assistant_config::detect_provider(base_url))
                 .with_custom_headers(cfg.custom_headers().to_vec())
         }
         "API Key" => KakuAssistantConfig::new(
@@ -2883,6 +2933,7 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
             cfg.model(),
             cfg.base_url(),
         )
+        .with_provider(cfg.provider())
         .with_custom_headers(cfg.custom_headers().to_vec()),
         _ => return Ok(()),
     };
@@ -6243,6 +6294,121 @@ provider = "managed:kimi-code"
 
         let not_ready = extract_kaku_assistant_fields("enabled = true\n");
         assert!(!should_collapse_kaku_assistant(&not_ready));
+    }
+
+    #[test]
+    fn kaku_assistant_fields_include_provider_dropdown() {
+        let fields = extract_kaku_assistant_fields(
+            "enabled = true\nprovider = \"MiniMax\"\napi_key = \"sk-test\"\nmodel = \"MiniMax-M2.7\"\nbase_url = \"https://api.minimax.io/v1\"\n",
+        );
+        let provider = fields
+            .iter()
+            .find(|f| f.key == "Provider")
+            .expect("Provider field");
+        assert_eq!(provider.value, "MiniMax");
+        assert!(provider.options.contains(&"MiniMax".to_string()));
+        assert!(provider.options.contains(&"VivGrid".to_string()));
+        assert!(provider.options.contains(&"Custom".to_string()));
+
+        let model = fields
+            .iter()
+            .find(|f| f.key == "Model")
+            .expect("Model field");
+        assert_eq!(model.value, "MiniMax-M2.7");
+        assert!(model.options.contains(&"MiniMax-M2.7".to_string()));
+        assert!(model
+            .options
+            .contains(&"MiniMax-M2.7-highspeed".to_string()));
+    }
+
+    #[test]
+    fn kaku_assistant_auto_detects_provider_from_base_url() {
+        let fields = extract_kaku_assistant_fields(
+            "enabled = true\nmodel = \"MiniMax-M2.7\"\nbase_url = \"https://api.minimax.io/v1\"\n",
+        );
+        let provider = fields
+            .iter()
+            .find(|f| f.key == "Provider")
+            .expect("Provider field");
+        assert_eq!(provider.value, "MiniMax");
+    }
+
+    #[test]
+    fn kaku_assistant_provider_defaults_to_vivgrid() {
+        let fields = extract_kaku_assistant_fields("enabled = true\n");
+        let provider = fields
+            .iter()
+            .find(|f| f.key == "Provider")
+            .expect("Provider field");
+        assert_eq!(provider.value, "VivGrid");
+    }
+
+    #[test]
+    fn kaku_assistant_custom_url_sets_custom_provider() {
+        let fields = extract_kaku_assistant_fields(
+            "enabled = true\nbase_url = \"https://my-proxy.example.com/v1\"\n",
+        );
+        let provider = fields
+            .iter()
+            .find(|f| f.key == "Provider")
+            .expect("Provider field");
+        assert_eq!(provider.value, "Custom");
+
+        let model = fields
+            .iter()
+            .find(|f| f.key == "Model")
+            .expect("Model field");
+        assert!(
+            model.options.is_empty(),
+            "Custom provider should have no model presets"
+        );
+    }
+
+    #[test]
+    fn kaku_assistant_save_provider_updates_base_url_and_model() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("assistant.toml");
+        std::fs::write(
+            &path,
+            "enabled = true\nprovider = \"VivGrid\"\nmodel = \"DeepSeek-V3.2\"\nbase_url = \"https://api.vivgrid.com/v1\"\n",
+        )
+        .expect("write temp config");
+
+        // Parse, change provider to MiniMax, and write
+        let raw = std::fs::read_to_string(&path).expect("read");
+        let cfg = parse_kaku_assistant_config(&raw);
+        let preset = assistant_config::provider_preset("MiniMax").expect("MiniMax preset");
+        let updated = KakuAssistantConfig::new(
+            cfg.is_enabled(),
+            cfg.api_key(),
+            preset.models[0],
+            preset.base_url,
+        )
+        .with_provider("MiniMax")
+        .with_custom_headers(cfg.custom_headers().to_vec());
+        write_kaku_assistant_config(&path, &updated).expect("write config");
+
+        let saved = std::fs::read_to_string(&path).expect("read saved");
+        assert!(saved.contains("model = \"MiniMax-M2.7\""));
+        assert!(saved.contains("base_url = \"https://api.minimax.io/v1\""));
+    }
+
+    #[test]
+    fn kaku_assistant_provider_round_trip_preserves_headers() {
+        let raw = "enabled = true\nprovider = \"MiniMax\"\napi_key = \"sk-test\"\nmodel = \"MiniMax-M2.7\"\nbase_url = \"https://api.minimax.io/v1\"\ncustom_headers = [\"X-Foo: bar\"]\n";
+        let cfg = parse_kaku_assistant_config(raw);
+        assert_eq!(cfg.provider(), "MiniMax");
+        assert_eq!(cfg.custom_headers(), &["X-Foo: bar"]);
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("assistant.toml");
+        write_kaku_assistant_config(&path, &cfg).expect("write config");
+        let saved = std::fs::read_to_string(&path).expect("read saved");
+        assert!(
+            !saved.contains("provider ="),
+            "provider must not be written to TOML"
+        );
+        assert!(saved.contains("custom_headers = [\"X-Foo: bar\"]"));
     }
 
     #[test]
