@@ -5291,8 +5291,6 @@ impl TermWindow {
             .iter()
             .enumerate()
             .map(|(idx, tab)| {
-                let panes = self.get_pos_panes_for_tab(tab);
-
                 TabInformation {
                     tab_index: idx,
                     tab_id: tab.tab_id(),
@@ -5303,10 +5301,11 @@ impl TermWindow {
                         .unwrap_or(false),
                     window_id: self.mux_window_id,
                     tab_title: tab.get_title(),
-                    active_pane: panes
-                        .iter()
+                    active_pane: tab
+                        .iter_panes()
+                        .into_iter()
                         .find(|p| p.is_active)
-                        .map(Self::pos_pane_to_pane_info),
+                        .map(|p| Self::pos_pane_to_pane_info(&p)),
                 }
             })
             .collect()

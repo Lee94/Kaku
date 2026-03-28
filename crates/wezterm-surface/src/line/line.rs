@@ -1099,6 +1099,12 @@ impl Line {
     /// Adjust the value of the wrapped attribute on the last cell of this
     /// line.
     pub fn set_last_cell_was_wrapped(&mut self, wrapped: bool, seqno: SequenceNo) {
+        if wrapped && !self.last_cell_was_wrapped() {
+            // This line is transitioning from non-wrapped to wrapped, meaning a new
+            // physical continuation line is being appended.  Any implicit hyperlink
+            // scan performed without that continuation is now stale.
+            self.bits &= !LineBits::SCANNED_IMPLICIT_HYPERLINKS;
+        }
         self.update_last_change_seqno(seqno);
         if let CellStorage::C(cl) = &mut self.cells {
             if cl.len() == 0 {
