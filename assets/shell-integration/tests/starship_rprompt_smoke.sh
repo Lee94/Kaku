@@ -48,7 +48,8 @@ mkdir -p "$HOME"
 # real downloads are not present in the checkout.
 vendor_dir="$tmp_dir/vendor"
 mkdir -p "$vendor_dir/zsh-z" "$vendor_dir/zsh-autosuggestions" \
-         "$vendor_dir/zsh-syntax-highlighting" "$vendor_dir/zsh-completions"
+         "$vendor_dir/zsh-syntax-highlighting" "$vendor_dir/fast-syntax-highlighting" \
+         "$vendor_dir/zsh-completions"
 
 echo "starship_rprompt: running setup_zsh.sh" >&2
 setup_out=""
