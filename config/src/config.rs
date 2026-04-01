@@ -993,7 +993,7 @@ fn default_remote_port() -> u16 {
 }
 
 fn default_remote_bind() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 
 fn default_tunnel_url() -> String {

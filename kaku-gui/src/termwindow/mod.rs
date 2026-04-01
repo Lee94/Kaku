@@ -205,16 +205,31 @@ fn ai_toast_lifetime_ms(message: &str) -> u64 {
 }
 
 fn normalize_bell_notification_source(value: &str) -> Option<String> {
-    let first_line = value.lines().next()?.trim();
+    let first_line = value
+        .lines()
+        .next()?
+        .trim()
+        .trim_start_matches("Bell from ")
+        .trim();
     if first_line.is_empty()
         || first_line.eq_ignore_ascii_case("kaku")
         || first_line.eq_ignore_ascii_case("wezterm")
+        || first_line.eq_ignore_ascii_case("bell")
     {
         return None;
     }
 
     let normalized = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
+        return None;
+    }
+
+    let normalized_lower = normalized.to_ascii_lowercase();
+    let normalized_len = normalized.chars().count();
+    const SHORT_OK: &[&str] = &[
+        "ls", "vi", "go", "rg", "fd", "gh", "jq", "hx", "cp", "mv", "rm", "sh", "nu",
+    ];
+    if normalized_len < 3 && !SHORT_OK.contains(&normalized_lower.as_str()) {
         return None;
     }
 
@@ -227,22 +242,141 @@ fn normalize_bell_notification_source(value: &str) -> Option<String> {
     Some(text)
 }
 
+fn summarize_bell_source(value: &str) -> Option<String> {
+    let normalized = normalize_bell_notification_source(value)?;
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+    summarize_bell_tokens(&tokens).or(Some(normalized))
+}
+
+fn summarize_bell_tokens(tokens: &[&str]) -> Option<String> {
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let token = tokens[idx];
+        let token_lower = token.to_ascii_lowercase();
+
+        if token_lower == "env"
+            || token_lower == "command"
+            || token_lower == "nohup"
+            || token_lower == "time"
+            || token_lower == "exec"
+            || token_lower == "builtin"
+        {
+            idx += 1;
+            continue;
+        }
+
+        // sudo may carry option-argument flags like `-u root`, `-g staff`.
+        // Skip sudo itself, then consume any flags and their arguments.
+        if token_lower == "sudo" {
+            idx += 1;
+            const SUDO_OPT_WITH_ARG: &[&str] = &[
+                "-u", "-g", "-C", "-D", "-R", "-T", "-h", "--user", "--group",
+            ];
+            while idx < tokens.len() {
+                let t = tokens[idx];
+                if SUDO_OPT_WITH_ARG.contains(&t) {
+                    idx += 2; // skip flag + its argument
+                } else if t.starts_with('-') {
+                    idx += 1; // skip standalone flag
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        let looks_like_env_assignment = token.contains('=')
+            && !token.starts_with('=')
+            && !token.starts_with('-')
+            && !token.contains('/');
+        if looks_like_env_assignment {
+            idx += 1;
+            continue;
+        }
+
+        let is_shell = matches!(token_lower.as_str(), "bash" | "zsh" | "sh" | "fish" | "nu");
+        if is_shell
+            && idx + 2 < tokens.len()
+            && matches!(tokens[idx + 1], "-c" | "-lc" | "-cl")
+        {
+            return summarize_bell_tokens(&tokens[idx + 2..]);
+        }
+
+        if token.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+
+        let command = Path::new(token)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| token.to_string());
+
+        let command_lower = command.to_ascii_lowercase();
+        let include_subcommand = matches!(
+            command_lower.as_str(),
+            "cargo"
+                | "git"
+                | "npm"
+                | "pnpm"
+                | "yarn"
+                | "go"
+                | "uv"
+                | "python"
+                | "python3"
+                | "pip"
+                | "brew"
+                | "make"
+                | "just"
+                | "docker"
+                | "kubectl"
+        );
+        if include_subcommand && idx + 1 < tokens.len() {
+            let next = tokens[idx + 1];
+            if !next.starts_with('-') && !next.contains('=') {
+                // Some tools have two-level subcommands: npm run build,
+                // docker compose up, kubectl get pods.
+                const TWO_LEVEL_PREFIX: &[&str] = &[
+                    "run", "exec", "compose", "get", "describe", "apply", "delete", "create",
+                ];
+                if idx + 2 < tokens.len() {
+                    let next2 = tokens[idx + 2];
+                    if TWO_LEVEL_PREFIX.contains(&next)
+                        && !next2.starts_with('-')
+                        && !next2.contains('=')
+                    {
+                        return Some(format!("{command} {next} {next2}"));
+                    }
+                }
+                return Some(format!("{command} {next}"));
+            }
+        }
+        return Some(command);
+    }
+
+    None
+}
+
 fn bell_notification_message(
     last_command: Option<&str>,
     reported_program: Option<&str>,
     pane_title: &str,
     foreground_process: Option<&str>,
 ) -> String {
-    if let Some(command) = last_command.and_then(normalize_bell_notification_source) {
-        return format!("Bell from {}", command);
+    if let Some(command) = last_command.and_then(summarize_bell_source) {
+        return format!("Task complete: {command}");
     }
 
-    if let Some(program) = reported_program.and_then(normalize_bell_notification_source) {
-        return format!("Bell from {}", program);
+    if let Some(program) = reported_program.and_then(summarize_bell_source) {
+        return format!("Task complete: {program}");
     }
 
-    if let Some(title) = normalize_bell_notification_source(pane_title) {
-        return format!("Bell from {}", title);
+    if let Some(title) = summarize_bell_source(pane_title) {
+        return format!("Task complete: {title}");
     }
 
     if let Some(process) = foreground_process
@@ -251,12 +385,12 @@ fn bell_notification_message(
                 .file_name()
                 .map(|name| name.to_string_lossy().into())
         })
-        .and_then(|value: String| normalize_bell_notification_source(&value))
+        .and_then(|value: String| summarize_bell_source(&value))
     {
-        return format!("Bell from {}", process);
+        return format!("Task complete: {process}");
     }
 
-    "Bell from a background pane".to_string()
+    "Background task complete".to_string()
 }
 
 /// Lookup table for simple lazygit/yazi toast messages dispatched via EmitEvent.
@@ -534,6 +668,7 @@ pub enum TermWindowNotif {
     },
     MuxNotification(MuxNotification),
     EmitStatusUpdate,
+    EmitTitleUpdate,
     Apply(Box<dyn FnOnce(&mut TermWindow) + Send + Sync>),
     SwitchToMuxWindow(MuxWindowId),
     SetInnerSize {
@@ -867,6 +1002,8 @@ pub struct TermWindow {
     line_quad_cache: RefCell<LfuCache<LineQuadCacheKey, LineQuadCacheValue>>,
 
     last_status_call: Instant,
+    status_update_queued: bool,
+    title_update_queued: bool,
     cursor_blink_state: RefCell<ColorEase>,
     blink_state: RefCell<ColorEase>,
     rapid_blink_state: RefCell<ColorEase>,
@@ -1421,6 +1558,8 @@ impl TermWindow {
                 &config,
             )),
             last_status_call: Instant::now(),
+            status_update_queued: false,
+            title_update_queued: false,
             cursor_blink_state: RefCell::new(ColorEase::new(
                 config.cursor_blink_rate,
                 config.cursor_blink_ease_in,
@@ -2003,7 +2142,7 @@ impl TermWindow {
                                 })
                                 .unwrap_or((None, None, String::new(), None));
                         ToastNotification {
-                            title: "Kaku Bell".to_string(),
+                            title: "Kaku".to_string(),
                             message: bell_notification_message(
                                 last_command.as_deref(),
                                 reported_program.as_deref(),
@@ -2096,7 +2235,12 @@ impl TermWindow {
                 | MuxNotification::WindowCreated(_) => {}
             },
             TermWindowNotif::EmitStatusUpdate => {
+                self.status_update_queued = false;
                 self.emit_status_event();
+            }
+            TermWindowNotif::EmitTitleUpdate => {
+                self.title_update_queued = false;
+                self.update_title_impl();
             }
             TermWindowNotif::GetSelectionForPane { pane_id, tx } => {
                 let mux = Mux::get();
@@ -2200,9 +2344,29 @@ impl TermWindow {
         Ok(())
     }
 
-    fn schedule_status_update(&self) {
-        if let Some(window) = self.window.as_ref() {
-            window.notify(TermWindowNotif::EmitStatusUpdate);
+    fn schedule_status_update(&mut self) {
+        if self.status_update_queued {
+            return;
+        }
+        if let Some(window) = self.window.as_ref().cloned() {
+            self.status_update_queued = true;
+            promise::spawn::spawn_into_main_thread(async move {
+                window.notify(TermWindowNotif::EmitStatusUpdate);
+            })
+            .detach();
+        }
+    }
+
+    fn schedule_title_update(&mut self) {
+        if self.title_update_queued {
+            return;
+        }
+        if let Some(window) = self.window.as_ref().cloned() {
+            self.title_update_queued = true;
+            promise::spawn::spawn_into_main_thread(async move {
+                window.notify(TermWindowNotif::EmitTitleUpdate);
+            })
+            .detach();
         }
     }
 
@@ -2931,7 +3095,7 @@ impl TermWindow {
     /// to update the right-status.
     fn update_title(&mut self) {
         self.schedule_status_update();
-        self.update_title_impl();
+        self.schedule_title_update();
     }
 
     fn window_contains_pane(&mut self, pane_id: PaneId) -> bool {
@@ -3006,7 +3170,7 @@ impl TermWindow {
     /// Called by window:set_right_status after the status has
     /// been updated; let's update the bar
     pub fn update_title_post_status(&mut self) {
-        self.update_title_impl();
+        self.schedule_title_update();
     }
 
     fn update_title_impl(&mut self) {
@@ -3938,6 +4102,9 @@ impl TermWindow {
                     self.show_toast(msg.to_string());
                 } else if name == "kaku-toast-ai-analyzing" {
                     let message = "Kaku Assistant analyzing command";
+                    self.show_ai_progress_toast(message.to_string(), ai_toast_lifetime_ms(message));
+                } else if name == "kaku-toast-ai-generating" {
+                    let message = "Kaku generating command";
                     self.show_ai_progress_toast(message.to_string(), ai_toast_lifetime_ms(message));
                 } else if name == "kaku-toast-ai-applied" {
                     // No notification on successful apply; command output is enough.
@@ -5586,7 +5753,7 @@ mod tests {
                 "kaku",
                 Some("/bin/zsh")
             ),
-            "Bell from cargo test -p kaku-gui"
+            "Task complete: cargo test"
         );
     }
 
@@ -5594,7 +5761,7 @@ mod tests {
     fn bell_notification_message_uses_reported_program_before_default_title() {
         assert_eq!(
             bell_notification_message(None, Some("npm run build"), "kaku", None),
-            "Bell from npm run build"
+            "Task complete: npm run build"
         );
     }
 
@@ -5602,7 +5769,7 @@ mod tests {
     fn bell_notification_message_falls_back_to_process_basename() {
         assert_eq!(
             bell_notification_message(None, None, "kaku", Some("/opt/homebrew/bin/git")),
-            "Bell from git"
+            "Task complete: git"
         );
     }
 
@@ -5610,7 +5777,39 @@ mod tests {
     fn bell_notification_message_uses_background_fallback_for_uninformative_values() {
         assert_eq!(
             bell_notification_message(Some("   "), Some("wezterm"), "kaku", None),
-            "Bell from a background pane"
+            "Background task complete"
+        );
+    }
+
+    #[test]
+    fn bell_notification_message_summarizes_shell_wrapped_command() {
+        assert_eq!(
+            bell_notification_message(Some("zsh -lc cargo check -p kaku-gui"), None, "kaku", None),
+            "Task complete: cargo check"
+        );
+    }
+
+    #[test]
+    fn bell_notification_message_ignores_weak_short_source() {
+        assert_eq!(
+            bell_notification_message(None, None, "vo", None),
+            "Background task complete"
+        );
+    }
+
+    #[test]
+    fn bell_notification_message_handles_sudo_with_user_flag() {
+        assert_eq!(
+            bell_notification_message(Some("sudo -u root cargo build"), None, "kaku", None),
+            "Task complete: cargo build"
+        );
+    }
+
+    #[test]
+    fn bell_notification_message_handles_docker_compose_up() {
+        assert_eq!(
+            bell_notification_message(Some("docker compose up -d"), None, "kaku", None),
+            "Task complete: docker compose up"
         );
     }
 }

@@ -943,6 +943,18 @@ mod tests {
             "bundled kaku.lua should resolve a missing color_scheme via appearance"
         );
     }
+
+    #[test]
+    fn bundled_kaku_lua_uses_config_for_remember_last_cwd() {
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../assets/macos/Kaku.app/Contents/Resources/kaku.lua");
+        let content = std::fs::read_to_string(&bundled).expect("read bundled kaku.lua");
+
+        assert!(
+            content.contains("return config.remember_last_cwd ~= false"),
+            "bundled kaku.lua should read remember_last_cwd from the parsed config table"
+        );
+    }
 }
 
 pub fn set_config_file_override(path: &Path) {

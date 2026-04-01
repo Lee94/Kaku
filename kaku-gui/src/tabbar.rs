@@ -43,7 +43,6 @@ pub struct TabEntry {
 #[derive(Clone, Debug)]
 struct TitleText {
     items: Vec<FormatItem>,
-    len: usize,
 }
 
 fn call_format_tab_title(
@@ -77,20 +76,14 @@ fn call_format_tab_title(
                 mlua::Value::Nil => Ok(None),
                 mlua::Value::Table(_) => {
                     let items = <Vec<FormatItem>>::from_lua(v, &*lua)?;
-
-                    let esc = format_as_escapes(items.clone())?;
-                    let line = parse_status_text(&esc, CellAttributes::default());
-
-                    Ok(Some(TitleText {
-                        items,
-                        len: line.len(),
-                    }))
+                    // Validate table payload from Lua early so downstream
+                    // format_as_escapes(...).expect() stays infallible.
+                    let _ = format_as_escapes(items.clone())?;
+                    Ok(Some(TitleText { items }))
                 }
                 _ => {
                     let s = String::from_lua(v, &*lua)?;
-                    let line = parse_status_text(&s, CellAttributes::default());
                     Ok(Some(TitleText {
-                        len: line.len(),
                         items: vec![FormatItem::Text(s)],
                     }))
                 }
@@ -163,12 +156,11 @@ fn compute_tab_title(
                 } else if let Some(ssh_host) = ssh_destination_for_pane(pane) {
                     ssh_host
                 } else {
-                    "no cwd".to_string()
+                    pane.title.clone()
                 };
                 build_default_title(tab, config, &title, true, false)
             } else {
                 TitleText {
-                    len: unicode_column_width(" no pane ", None),
                     items: vec![FormatItem::Text(" no pane ".to_string())],
                 }
             }
@@ -216,7 +208,7 @@ pub fn compute_tab_plain_title(tab: &TabInformation) -> String {
         if let Some(ssh_host) = ssh_destination_for_pane(pane) {
             return ssh_host;
         }
-        return "no cwd".to_string();
+        return pane.title.clone();
     }
 
     "no pane".to_string()
@@ -280,10 +272,9 @@ fn build_default_title(
         }
     }
 
-    len += unicode_column_width(&title, None);
     items.push(FormatItem::Text(title));
 
-    TitleText { len, items }
+    TitleText { items }
 }
 
 /// Detect the SSH destination for a pane, used to show the remote host in tab titles.
@@ -599,29 +590,18 @@ impl TabBarState {
         // are symbols representing minimize, maximize and close.
 
         let mut active_tab_no = 0;
-
-        let tab_titles: Vec<TitleText> = if config.show_tabs_in_tab_bar {
-            tab_info
-                .iter()
-                .map(|tab| {
-                    if tab.is_active {
-                        active_tab_no = tab.tab_index;
-                    }
-                    compute_tab_title(
-                        tab,
-                        tab_info,
-                        pane_info,
-                        config,
-                        false,
-                        config.tab_max_width,
-                    )
-                })
-                .collect()
+        if config.show_tabs_in_tab_bar {
+            for tab in tab_info {
+                if tab.is_active {
+                    active_tab_no = tab.tab_index;
+                }
+            }
+        }
+        let number_of_tabs = if config.show_tabs_in_tab_bar {
+            tab_info.len()
         } else {
-            vec![]
+            0
         };
-        let titles_len: usize = tab_titles.iter().map(|s| s.len).sum();
-        let number_of_tabs = tab_titles.len();
 
         // Tab titles are rendered contiguously; only reserve width for controls
         // that are actually shown.
@@ -631,14 +611,19 @@ impl TabBarState {
             0
         };
         let available_cells = title_width.saturating_sub(controls_width);
-        let tab_width_max = if config.use_fancy_tab_bar || available_cells >= titles_len {
-            // We can render each title with its full width
+        let tab_width_max = if number_of_tabs == 0 {
+            config.tab_max_width.max(1)
+        } else if config.use_fancy_tab_bar {
             usize::MAX
         } else {
-            // We need to clamp the length to balance them out
-            available_cells / number_of_tabs
-        }
-        .min(config.tab_max_width);
+            let per_tab = (available_cells / number_of_tabs).max(1);
+            per_tab.min(config.tab_max_width.max(1))
+        };
+        let tab_title_max_width_for_callback = if tab_width_max == usize::MAX {
+            config.tab_max_width.max(1)
+        } else {
+            tab_width_max
+        };
 
         let mut line = Line::with_width(0, SEQ_ZERO);
 
@@ -683,33 +668,30 @@ impl TabBarState {
             line.append_line(left_status_line, SEQ_ZERO);
         }
 
-        for (tab_idx, tab_title) in tab_titles.iter().enumerate() {
-            let tab_title_len = tab_title.len.min(tab_width_max);
+        for tab_idx in 0..number_of_tabs {
             let active = tab_idx == active_tab_no;
-            let hover = !active && is_tab_hover(mouse_x, x, tab_title_len);
+            let mut hover = false;
 
-            // Recompute the title so that it factors in both the hover state
-            // and the adjusted maximum tab width based on available space.
-            let tab_title = compute_tab_title(
+            // Compute once with hover=false and only recompute when this tab is hovered.
+            // This avoids doubling Lua callback cost for every tab on every refresh.
+            let mut tab_title = compute_tab_title(
                 &tab_info[tab_idx],
                 tab_info,
                 pane_info,
                 config,
-                hover,
-                tab_title_len,
+                false,
+                tab_title_max_width_for_callback,
             );
-
-            let cell_attrs = if active {
+            let mut cell_attrs = if active {
                 &active_cell_attrs
-            } else if hover {
-                &inactive_hover_attrs
             } else {
                 &inactive_cell_attrs
             };
 
             let tab_start_idx = x;
 
-            let esc = format_as_escapes(tab_title.items.clone()).expect("already parsed ok above");
+            let mut esc =
+                format_as_escapes(tab_title.items.clone()).expect("already parsed ok above");
             let mut tab_line = parse_status_text(
                 &esc,
                 if config.use_fancy_tab_bar {
@@ -718,13 +700,38 @@ impl TabBarState {
                     cell_attrs.clone()
                 },
             );
-
-            let title = tab_line.clone();
             if tab_line.len() > tab_width_max {
                 tab_line.resize(tab_width_max, SEQ_ZERO);
             }
-
-            let width = tab_line.len();
+            let mut width = tab_line.len();
+            if !active {
+                hover = is_tab_hover(mouse_x, x, width);
+            }
+            if hover {
+                tab_title = compute_tab_title(
+                    &tab_info[tab_idx],
+                    tab_info,
+                    pane_info,
+                    config,
+                    true,
+                    tab_title_max_width_for_callback,
+                );
+                cell_attrs = &inactive_hover_attrs;
+                esc = format_as_escapes(tab_title.items.clone()).expect("already parsed ok above");
+                tab_line = parse_status_text(
+                    &esc,
+                    if config.use_fancy_tab_bar {
+                        CellAttributes::default()
+                    } else {
+                        cell_attrs.clone()
+                    },
+                );
+                if tab_line.len() > tab_width_max {
+                    tab_line.resize(tab_width_max, SEQ_ZERO);
+                }
+                width = tab_line.len();
+            }
+            let title = tab_line.clone();
 
             items.push(TabEntry {
                 item: TabBarItem::Tab { tab_idx, active },

@@ -1,6 +1,7 @@
 use anyhow::Context;
 use axum::extract::{ws, Path, Query, State};
-use axum::response::{Html, Response};
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use config::{configuration, RgbaColor};
@@ -130,7 +131,13 @@ fn capture_pane(pane_id: usize) -> Option<ScreenUpdate> {
 
 // ── HTTP routes ───────────────────────────────────────────────────────────────
 
-async fn route_config() -> axum::Json<serde_json::Value> {
+async fn route_config(
+    Query(query): Query<WsQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !check_token(&query, &headers) {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    }
     let cfg = configuration();
     let palette = &cfg.resolved_palette;
 
@@ -162,10 +169,16 @@ async fn route_config() -> axum::Json<serde_json::Value> {
         font_size: cfg.font_size,
     };
 
-    axum::Json(serde_json::to_value(&info).unwrap_or_default())
+    axum::Json(serde_json::to_value(&info).unwrap_or_default()).into_response()
 }
 
-async fn route_panes() -> axum::Json<serde_json::Value> {
+async fn route_panes(
+    Query(query): Query<WsQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !check_token(&query, &headers) {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    }
     let panes: Vec<PaneInfo> = Mux::try_get()
         .map(|mux| {
             mux.iter_panes()
@@ -184,7 +197,17 @@ async fn route_panes() -> axum::Json<serde_json::Value> {
         })
         .unwrap_or_default();
 
-    axum::Json(serde_json::to_value(&panes).unwrap_or_default())
+    axum::Json(serde_json::to_value(&panes).unwrap_or_default()).into_response()
+}
+
+fn check_token(query: &WsQuery, headers: &axum::http::HeaderMap) -> bool {
+    let expected = get_or_init_token();
+    headers
+        .get("x-kaku-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|t| t == expected)
+        .unwrap_or(false)
+        || query.token.as_deref() == Some(expected)
 }
 
 // ── QR code endpoint ──────────────────────────────────────────────────────────
@@ -258,19 +281,8 @@ async fn route_ws(
     headers: axum::http::HeaderMap,
     ws_upgrade: ws::WebSocketUpgrade,
 ) -> Response {
-    let expected = get_or_init_token();
-    let ok = headers
-        .get("x-kaku-token")
-        .and_then(|v| v.to_str().ok())
-        .map(|t| t == expected)
-        .unwrap_or(false)
-        || query.token.as_deref() == Some(expected);
-
-    if !ok {
-        return axum::response::IntoResponse::into_response((
-            axum::http::StatusCode::UNAUTHORIZED,
-            "invalid token",
-        ));
+    if !check_token(&query, &headers) {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
 
     let rx = {
@@ -295,7 +307,11 @@ async fn handle_ws(
     if let Some(update) = capture_pane(pane_id) {
         if let Ok(json) = serde_json::to_string(&update) {
             if let Err(e) = sender.send(ws::Message::Text(json.into())).await {
-                log::debug!("kaku-remote: failed to send initial snapshot for pane {}: {:?}", pane_id, e);
+                log::debug!(
+                    "kaku-remote: failed to send initial snapshot for pane {}: {:?}",
+                    pane_id,
+                    e
+                );
             }
         }
     }
@@ -329,7 +345,11 @@ async fn handle_ws(
             if let Some(mux) = Mux::try_get() {
                 if let Some(pane) = mux.get_pane(mux::pane::PaneId::from(pane_id)) {
                     if let Err(e) = pane.writer().write_all(input.as_bytes()) {
-                        log::debug!("kaku-remote: failed to write input to pane {}: {}", pane_id, e);
+                        log::debug!(
+                            "kaku-remote: failed to write input to pane {}: {}",
+                            pane_id,
+                            e
+                        );
                     }
                 }
             }
@@ -352,7 +372,11 @@ fn on_pane_output(pane_id: usize, senders: PaneSenders) {
         }
         if let Some(update) = capture_pane(pane_id) {
             if let Err(e) = tx.send(update) {
-                log::debug!("kaku-remote: failed to broadcast update for pane {}: {:?}", pane_id, e);
+                log::debug!(
+                    "kaku-remote: failed to broadcast update for pane {}: {:?}",
+                    pane_id,
+                    e
+                );
             }
         }
     }
@@ -608,19 +632,27 @@ pub fn start() {
                     .route("/ws/{pane_id}", get(route_ws))
                     .with_state(state);
 
-                let addr: SocketAddr = format!("{}:{}", bind, port)
-                    .parse()
-                    .expect("valid bind address");
+                let addr: SocketAddr = match format!("{}:{}", bind, port).parse() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        log::error!("kaku-remote: invalid bind address: {e}");
+                        return;
+                    }
+                };
 
                 log::info!("kaku-remote: listening on http://{}", addr);
                 write_state(port, token, tunnel_relay_opt.as_deref());
 
-                let listener = tokio::net::TcpListener::bind(addr)
-                    .await
-                    .expect("kaku-remote bind");
-                axum::serve(listener, app.into_make_service())
-                    .await
-                    .expect("kaku-remote server");
+                let listener = match tokio::net::TcpListener::bind(addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!("kaku-remote: failed to bind {addr}: {e}");
+                        return;
+                    }
+                };
+                if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+                    log::error!("kaku-remote: server error: {e}");
+                }
             });
         })
         .expect("spawn kaku-remote thread");

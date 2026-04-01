@@ -160,7 +160,7 @@ resolve_kaku_flavor_from_config() {
 		fi
 	fi
 
-	printf '%s\n' "kaku-dark"
+	printf '%s\n' "$system_flavor"
 }
 
 current_kaku_yazi_flavor() {
@@ -340,7 +340,7 @@ resolve_kaku_flavor_from_config() {
 		fi
 	fi
 
-	printf '%s\n' "kaku-dark"
+	printf '%s\n' "$system_flavor"
 }
 
 current_flavor() {
@@ -776,6 +776,43 @@ function __kaku_ai_precmd --on-event fish_prompt
     __kaku_set_user_var kaku_last_exit_code $last_exit
     set -g _kaku_ai_cmd_pending 0
 end
+
+# AI generate: intercept Enter on "# query" lines.
+# fish_preexec does not fire for comment-only lines, so we bind \r to
+# catch the commandline buffer before fish discards the comment.
+set -g __kaku_ai_waiting 0
+set -g __kaku_ai_waiting_ts 0
+
+function __kaku_ai_query_execute
+    if not set -q KAKU_AUTO_DISABLE
+        set -l cmd (commandline)
+        # Only intercept a single-line comment (no newline in buffer)
+        if string match -qr '^#[^\n]*$' -- $cmd
+            # Block repeat Enter while waiting, auto-reset after 30 seconds
+            if test "$__kaku_ai_waiting" = 1
+                set -l now (date +%s)
+                if test (math "$now - $__kaku_ai_waiting_ts") -gt 30
+                    set -g __kaku_ai_waiting 0
+                else
+                    return
+                end
+            end
+            set -l query (string replace -r '^#\s*' '' -- $cmd)
+            if test -n "$query"
+                set -g __kaku_ai_waiting 1
+                set -g __kaku_ai_waiting_ts (date +%s)
+                __kaku_set_user_var kaku_ai_query $query
+                # Keep # query visible; Lua sends \x15 to clear it when result arrives
+                commandline -f repaint
+                return
+            end
+        end
+    end
+    set -g __kaku_ai_waiting 0
+    commandline -f execute
+end
+bind \r __kaku_ai_query_execute
+bind \n __kaku_ai_query_execute
 
 # === Common abbreviations ===
 abbr -a ll 'ls -lhF'

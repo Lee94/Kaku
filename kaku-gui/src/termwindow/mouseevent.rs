@@ -1,17 +1,17 @@
 use crate::tabbar::TabBarItem;
 use crate::termwindow::tab_rename::TabRenameModal;
 use crate::termwindow::{
-    GuiWin, MouseCapture, PositionedSplit, ScrollHit, TMB, TermWindowNotif, UIItem, UIItemType,
+    GuiWin, MouseCapture, PositionedSplit, ScrollHit, TermWindowNotif, UIItem, UIItemType, TMB,
 };
 use ::window::{
     MouseButtons as WMB, MouseCursor, MouseEvent, MouseEventKind as WMEK, MousePress, WindowOps,
     WindowState,
 };
-use config::MouseEventAltScreen;
 use config::keyassignment::{KeyAssignment, MouseEventTrigger, SpawnTabDomain};
-use mux::Mux;
+use config::MouseEventAltScreen;
 use mux::pane::{CachePolicy, Pane, WithPaneLines};
 use mux::tab::SplitDirection;
+use mux::Mux;
 use mux_lua::MuxPane;
 use std::convert::TryInto;
 use std::ops::Sub;
@@ -1232,6 +1232,9 @@ impl super::TermWindow {
                 stable_row,
             ));
 
+        // apply_hyperlinks internally uses Screen::for_each_logical_line_in_stable_range_mut
+        // which already walks backwards/forwards to cover the full logical line, so
+        // passing the hovered row is sufficient even when the URL wraps across physical rows.
         pane.apply_hyperlinks(stable_row..stable_row + 1, &self.config.hyperlink_rules);
 
         struct FindCurrentLink {
@@ -1571,8 +1574,9 @@ fn mouse_press_to_tmb(press: &MousePress) -> TMB {
 #[cfg(test)]
 mod tests {
     use super::{
-        MouseDispatchTarget, mouse_dispatch_target, should_preserve_tmux_bypass_reporting,
+        mouse_dispatch_target, should_preserve_tmux_bypass_reporting,
         should_suppress_wheel_during_terminal_selection, should_zoom_title_area,
+        MouseDispatchTarget,
     };
     use crate::termwindow::MouseCapture;
     use mux::pane::PaneId;

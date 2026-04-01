@@ -169,7 +169,7 @@ resolve_kaku_flavor_from_config() {
 		fi
 	fi
 
-	printf '%s\n' "kaku-dark"
+	printf '%s\n' "$system_flavor"
 }
 
 current_kaku_yazi_flavor() {
@@ -348,7 +348,7 @@ resolve_kaku_flavor_from_config() {
 		fi
 	fi
 
-	printf '%s\n' "kaku-dark"
+	printf '%s\n' "$system_flavor"
 }
 
 current_flavor() {
@@ -1184,6 +1184,10 @@ if ! (( \${+functions[_zsh_highlight]} )) && [[ -f "\$KAKU_ZSH_DIR/plugins/fast-
     fast_syntax_highlighting_defer() {
         source "\$KAKU_ZSH_DIR/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh"
 
+        # Override comment color: fsh default (fg=8) is invisible on dark backgrounds.
+        typeset -gA FAST_HIGHLIGHT_STYLES
+        FAST_HIGHLIGHT_STYLES[comment]='fg=244'
+
         # Remove this hook after first run
         precmd_functions=("\${precmd_functions[@]:#fast_syntax_highlighting_defer}")
     }
@@ -1277,6 +1281,52 @@ if (( \$+functions[add-zle-hook-widget] )); then
     add-zle-hook-widget line-pre-redraw _kaku_cancel_ai_on_typing
     add-zle-hook-widget line-init _kaku_reset_ai_cancel_flag
 fi
+
+# AI generate: intercept Enter on "# query" lines via accept-line widget.
+# preexec does not fire for comment-only lines (zsh strips them before execution),
+# so we wrap accept-line instead. Registration is deferred to first prompt so it
+# runs after zsh-autosuggestions finishes binding its own widgets.
+_kaku_ai_waiting=0
+_kaku_ai_waiting_ts=0
+_kaku_ai_reset_waiting() { _kaku_ai_waiting=0; }
+add-zsh-hook precmd _kaku_ai_reset_waiting
+
+_kaku_ai_query_accept_line() {
+    # Block repeat Enter only while buffer still shows the # query.
+    # Auto-reset after 30 seconds to prevent permanent blocking if Lua side fails.
+    if (( _kaku_ai_waiting )); then
+        if [[ "\${BUFFER[1]}" == '#' ]]; then
+            local now=\$EPOCHSECONDS
+            if (( now - _kaku_ai_waiting_ts > 30 )); then
+                _kaku_ai_waiting=0
+            else
+                return
+            fi
+        else
+            _kaku_ai_waiting=0
+        fi
+    fi
+    # Only intercept a single-line comment (no newlines in buffer)
+    if [[ -z "\${KAKU_AUTO_DISABLE:-}" && -n "\$BUFFER" && "\${BUFFER[1]}" == '#' && "\$BUFFER" != *\$'\\n'* ]]; then
+        local query="\${BUFFER:1}"
+        query="\${query# }"
+        if [[ -n "\$query" ]]; then
+            _kaku_set_user_var "kaku_ai_query" "\$query"
+            _kaku_ai_waiting=1
+            _kaku_ai_waiting_ts=\$EPOCHSECONDS
+            # Keep # query visible; Lua sends \x15 to clear it when result arrives
+            zle reset-prompt
+            return
+        fi
+    fi
+    zle .accept-line
+}
+
+_kaku_ai_query_register_widget() {
+    zle -N accept-line _kaku_ai_query_accept_line
+    precmd_functions=("\${precmd_functions[@]:#_kaku_ai_query_register_widget}")
+}
+precmd_functions+=(_kaku_ai_query_register_widget)
 
 # Auto-set TERM to xterm-256color for SSH connections when running under kaku,
 # since remote hosts typically lack the kaku terminfo entry.

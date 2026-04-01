@@ -104,7 +104,6 @@ local user_has_custom_padding = false
 local user_has_custom_font = false
 local user_has_custom_font_rules = false
 local user_has_custom_window_frame = false
-local remember_last_cwd = true
 
 local function check_user_custom_config()
   local user_config_path = kaku_user_config_path()
@@ -131,14 +130,15 @@ local function check_user_custom_config()
       if trimmed:match('^config%.window_frame%s*=') then
         user_has_custom_window_frame = true
       end
-      if trimmed:match('^config%.remember_last_cwd%s*=%s*false') then
-        remember_last_cwd = false
-      end
     end
   end
   file:close()
 end
 check_user_custom_config()
+
+local function should_remember_last_cwd()
+  return config.remember_last_cwd ~= false
+end
 
 local function resolve_appearance_color_scheme()
   local gui = wezterm.gui
@@ -1356,6 +1356,137 @@ local function request_ai_fix_async(window, pane, pane_id, failed_command, exit_
   return true
 end
 
+local function build_ai_generate_messages(query, cwd, git_branch)
+  local context = {
+    "Request: " .. query,
+    "Working directory: " .. (cwd ~= "" and cwd or "(unknown)"),
+  }
+  if git_branch ~= "" then
+    context[#context + 1] = "Git branch: " .. git_branch
+  end
+  return {
+    {
+      role = "system",
+      content = "You are a shell command assistant. Output English only and return exactly one JSON object with keys summary, command, why, confidence. Do not use markdown or code fences. summary must be one concise sentence <= 72 chars and must not contain parentheses. command must be a single executable shell command that fulfills the request. Never use aliases like ll. If you cannot produce a safe direct command, set command to an empty string.",
+    },
+    {
+      role = "user",
+      content = table.concat(context, "\n"),
+    },
+  }
+end
+
+local function show_ai_generating_toast(window, pane)
+  if not window or not pane then
+    return
+  end
+  local ok, err = pcall(function()
+    window:perform_action(wezterm.action.EmitEvent("kaku-toast-ai-generating"), pane)
+  end)
+  if not ok then
+    ai_debug_log("show_ai_generating_toast failed: " .. tostring(err))
+  end
+end
+
+local function safe_send_clear(pane, extra)
+  local ok, err = pcall(function() pane:send_text("\x15" .. (extra or "")) end)
+  if not ok then
+    ai_debug_log("send_text failed: " .. tostring(err))
+  end
+  return ok
+end
+
+local ai_generate_state_by_pane = {}
+
+local function poll_ai_generate_job(window, pane, pane_id, job)
+  local pane_state = ai_generate_state_by_pane[pane_id]
+  if not pane_state or pane_state.pending_job_id ~= job.id then
+    cleanup_ai_fix_job_files(job)
+    return
+  end
+
+  local status_text = read_text_file(job.paths.status_path)
+  local status_value = trim_surrounding_whitespace(status_text or "")
+  if status_value == "" then
+    if (now_secs() - job.started_at) >= ai_fix_poll_deadline_secs then
+      pane_state.inflight = false
+      pane_state.pending_job_id = nil
+      cleanup_ai_fix_job_files(job)
+      ai_debug_log("ai_generate_job timeout pane_id=" .. pane_id)
+      safe_send_clear(pane)
+      inject_ai_status_and_finalize(pane, "Could not generate command right now.")
+      return
+    end
+    wezterm.time.call_after(ai_fix_poll_interval_secs, function()
+      poll_ai_generate_job(window, pane, pane_id, job)
+    end)
+    return
+  end
+
+  local status_code = tonumber(status_value)
+  local stdout = read_text_file(job.paths.response_path) or ""
+  local stderr = read_text_file(job.paths.stderr_path) or ""
+  cleanup_ai_fix_job_files(job)
+
+  pane_state.inflight = false
+  pane_state.pending_job_id = nil
+
+  if status_code ~= 0 then
+    ai_debug_log("ai_generate_job failed pane_id=" .. pane_id .. " status=" .. tostring(status_code) .. " err=" .. tostring(stderr))
+    safe_send_clear(pane)
+    inject_ai_status_and_finalize(pane, "Could not generate command right now.")
+    return
+  end
+
+  local result, parse_err = parse_ai_fix_response(stdout)
+  if not result then
+    ai_debug_log("ai_generate_job invalid_response pane_id=" .. pane_id .. " err=" .. tostring(parse_err))
+    safe_send_clear(pane)
+    inject_ai_status_and_finalize(pane, "Could not generate command right now.")
+    return
+  end
+
+  local command = sanitize_suggested_command(result.command or "")
+  if command == "" then
+    safe_send_clear(pane)
+    inject_ai_status_and_finalize(pane, normalize_ai_summary(result.summary or "", "No command found for this request."))
+    return
+  end
+
+  local sent_ok = safe_send_clear(pane, command)
+  if not sent_ok then
+    inject_ai_status_and_finalize(pane, "Could not inject generated command.")
+    return
+  end
+  if is_dangerous_command(command) then
+    inject_ai_status(pane, "Dangerous command loaded. Please review before running.")
+  end
+end
+
+local function request_ai_generate_async(window, pane, pane_id, query, cwd, git_branch)
+  local messages = build_ai_generate_messages(query, cwd, git_branch)
+  local payload, payload_err = encode_ai_fix_payload(ai_fix_model, messages)
+  if not payload then
+    return nil, payload_err or "failed to encode request payload"
+  end
+
+  local job, job_err = start_ai_fix_background_job(payload)
+  if not job then
+    return nil, job_err or "failed to start background request"
+  end
+
+  local pane_state = ai_generate_state_by_pane[pane_id]
+  if pane_state then
+    pane_state.pending_job_id = job.id
+  end
+  ai_debug_log("ai_generate_job started pane_id=" .. pane_id .. " job_id=" .. job.id)
+
+  wezterm.time.call_after(ai_fix_poll_interval_secs, function()
+    poll_ai_generate_job(window, pane, pane_id, job)
+  end)
+  return true
+end
+
 local function ensure_kaku_state_dir()
   if not kaku_state_dir or kaku_state_dir == "" then
     return
@@ -2465,6 +2596,7 @@ local KAKU_RED = '#ff6767'
 -- permanently lit for TUI apps like Claude Code), bell events only fire when
 -- a program explicitly sends BEL (\a), making them suitable as completion signals.
 local _bell_panes = {}
+local _last_bell_evict_secs = 0
 
 wezterm.on('bell', function(window, pane)
   _bell_panes[tostring(pane:pane_id())] = true
@@ -2474,6 +2606,16 @@ local function evict_stale_bell_panes(live_pane_ids)
   for pane_id in pairs(_bell_panes) do
     if not live_pane_ids[pane_id] then
       _bell_panes[pane_id] = nil
+    end
+  end
+  for pane_id in pairs(ai_fix_state_by_pane) do
+    if not live_pane_ids[pane_id] then
+      ai_fix_state_by_pane[pane_id] = nil
+    end
+  end
+  for pane_id in pairs(ai_generate_state_by_pane) do
+    if not live_pane_ids[pane_id] then
+      ai_generate_state_by_pane[pane_id] = nil
     end
   end
 end
@@ -2499,8 +2641,8 @@ local function tab_pane_keys(tab)
   return keys
 end
 
-local function tab_has_bell(tab)
-  for _, pane_key in ipairs(tab_pane_keys(tab)) do
+local function tab_has_bell_from_keys(pane_keys)
+  for _, pane_key in ipairs(pane_keys) do
     if _bell_panes[pane_key] then
       return true
     end
@@ -2508,8 +2650,8 @@ local function tab_has_bell(tab)
   return false
 end
 
-local function clear_tab_bells(tab)
-  for _, pane_key in ipairs(tab_pane_keys(tab)) do
+local function clear_tab_bells_from_keys(pane_keys)
+  for _, pane_key in ipairs(pane_keys) do
     _bell_panes[pane_key] = nil
   end
 end
@@ -2550,7 +2692,11 @@ wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, m
       end
     end
     evict_stale_cache(live_pane_ids)
-    evict_stale_bell_panes(live_pane_ids)
+    local now = now_secs()
+    if now - _last_bell_evict_secs >= 5 then
+      evict_stale_bell_panes(live_pane_ids)
+      _last_bell_evict_secs = now
+    end
   end
 
   local text, active_pane = tab_display_title(tab, effective_config)
@@ -2579,21 +2725,22 @@ wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, m
     fg = tab.is_active and KAKU_WHITE or (hover and KAKU_WHITE or KAKU_GRAY)
   end
 
-  local has_bell = tab_has_bell(tab)
+  local pane_keys = tab_pane_keys(tab)
+  local has_bell = tab_has_bell_from_keys(pane_keys)
   if has_bell and tab.is_active then
-    clear_tab_bells(tab)
+    clear_tab_bells_from_keys(pane_keys)
     has_bell = false
   end
 
-  -- Bell-based suffix indicator: show a small dot after the title when a BEL
+  -- Bell-based prefix indicator: show a small dot before the title when a BEL
   -- was received, and honor the standard bell_tab_indicator toggle.
   if has_bell and effective_config.bell_tab_indicator ~= false then
     return {
       { Attribute = { Intensity = intensity } },
+      { Foreground = { Color = KAKU_ORANGE } },
+      { Text = ' ● ' },
       { Foreground = { Color = fg } },
-      { Text = ' ' .. text .. ' ' },
-      { Foreground = { Color = KAKU_PURPLE } },
-      { Text = '• ' },
+      { Text = text .. ' ' },
     }
   end
 
@@ -2753,15 +2900,28 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
     end
 
     local pane_id = tostring(pane_id_value)
-    local pane_state = ai_fix_state_by_pane[pane_id]
-    if not pane_state or not pane_state.inflight then
-      return
+    local cancelled_any = false
+
+    local fix_state = ai_fix_state_by_pane[pane_id]
+    if fix_state and fix_state.inflight then
+      fix_state.inflight = false
+      fix_state.pending_job_id = nil
+      clear_ai_fix_suggestion_state(fix_state)
+      ai_debug_log("user-var-changed user typing cancelled ai fix pane_id=" .. pane_id)
+      cancelled_any = true
     end
 
-    pane_state.inflight = false
-    pane_state.pending_job_id = nil
-    clear_ai_fix_suggestion_state(pane_state)
-    ai_debug_log("user-var-changed user typing cancelled ai fix pane_id=" .. pane_id)
+    local gen_state = ai_generate_state_by_pane[pane_id]
+    if gen_state and gen_state.inflight then
+      gen_state.inflight = false
+      gen_state.pending_job_id = nil
+      ai_debug_log("user-var-changed user typing cancelled ai generate pane_id=" .. pane_id)
+      cancelled_any = true
+    end
+
+    if not cancelled_any then
+      return
+    end
     return
   end
 
@@ -2802,7 +2962,8 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
   local pane_state = ai_fix_state_by_pane[pane_id] or {}
   ai_fix_state_by_pane[pane_id] = pane_state
 
-  if pane_state.inflight then
+  local gen_state = ai_generate_state_by_pane[pane_id]
+  if pane_state.inflight or (gen_state and gen_state.inflight) then
     ai_debug_log("user-var-changed skipped inflight pane_id=" .. pane_id)
     return
   end
@@ -2873,9 +3034,70 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
   end
 end)
 
+wezterm.on('user-var-changed', function(window, pane, name, value)
+  if name ~= "kaku_ai_query" then
+    return
+  end
+  if not pane then
+    return
+  end
+
+  local query = trim_surrounding_whitespace(value or "")
+  if query == "" then
+    return
+  end
+
+  local pane_id_ok, pane_id_value = pcall(function()
+    return pane:pane_id()
+  end)
+  if not pane_id_ok or not pane_id_value then
+    return
+  end
+  local pane_id = tostring(pane_id_value)
+
+  local pane_state = ai_generate_state_by_pane[pane_id] or {}
+  ai_generate_state_by_pane[pane_id] = pane_state
+
+  local fix_state = ai_fix_state_by_pane[pane_id]
+  if pane_state.inflight or (fix_state and fix_state.inflight) then
+    ai_debug_log("ai_generate skipped inflight pane_id=" .. pane_id)
+    return
+  end
+
+  refresh_ai_fix_settings()
+  if not ai_fix_enabled then
+    return
+  end
+  if not ai_fix_api_key or ai_fix_api_key == "" then
+    pcall(function()
+      window:perform_action(wezterm.action.EmitEvent("kaku-toast-ai-missing-key"), pane)
+    end)
+    return
+  end
+
+  if not is_shell_foreground(pane) then
+    ai_debug_log("ai_generate skipped non-shell foreground pane_id=" .. pane_id)
+    return
+  end
+
+  pane_state.inflight = true
+  pane_state.pending_job_id = nil
+  show_ai_generating_toast(window, pane)
+
+  local cwd = pane_cwd(pane)
+  local git_branch = detect_git_branch(cwd)
+  local ok, err = request_ai_generate_async(window, pane, pane_id, query, cwd, git_branch)
+  if not ok then
+    pane_state.inflight = false
+    pane_state.pending_job_id = nil
+    ai_debug_log("ai_generate request start failed err=" .. tostring(err))
+    inject_ai_status_and_finalize(pane, "Could not generate command right now.")
+  end
+end)
+
 wezterm.on('update-right-status', function(window, pane)
   pane = resolve_active_pane(window, pane)
-  if remember_last_cwd then
+  if should_remember_last_cwd() then
     local ok, cwd = pcall(function() return pane:get_current_working_dir() end)
     if ok and cwd then
       -- Url userdata: .host is nil for local file:/// URLs, hostname string for SSH.
@@ -3923,7 +4145,7 @@ wezterm.on('gui-startup', function(cmd)
   -- Normal startup
   if not cmd then
     local start_cwd = nil
-    if remember_last_cwd then
+    if should_remember_last_cwd() then
       local saved = read_last_cwd()
       if saved and saved ~= '' then
         local result = os.execute(string.format('[ -d %q ] 2>/dev/null', saved))

@@ -11,9 +11,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$tmp_dir/vendor/zsh-z" \
+mkdir -p "$tmp_dir/vendor/fast-syntax-highlighting" \
 	"$tmp_dir/vendor/zsh-autosuggestions" \
-	"$tmp_dir/vendor/zsh-syntax-highlighting" \
 	"$tmp_dir/vendor/zsh-completions"
 
 run_setup() {
@@ -27,8 +26,6 @@ run_setup() {
 	bash "$REPO_ROOT/assets/shell-integration/setup_zsh.sh" --update-only >/dev/null
 }
 
-expected_flavor="kaku-dark"
-
 expected_auto_flavor() {
 	if command -v defaults >/dev/null 2>&1; then
 		local appearance
@@ -41,6 +38,8 @@ expected_auto_flavor() {
 
 	printf '%s\n' "kaku-dark"
 }
+
+expected_flavor="$(expected_auto_flavor)"
 
 home_new="$tmp_dir/home-new"
 mkdir -p "$home_new"
