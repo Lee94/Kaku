@@ -1959,6 +1959,18 @@ impl Config {
         // de-facto standard for identifying the terminal.
         cmd.env("TERM_PROGRAM", "Kaku");
         cmd.env("TERM_PROGRAM_VERSION", crate::wezterm_version());
+        // Sync East Asian Ambiguous width with go-runewidth (used by bubbletea/lipgloss
+        // Go TUI programs). Without this, go-runewidth auto-detects CJK locale and treats
+        // ambiguous-width chars as wide=2, while Kaku defaults to narrow=1, causing
+        // character misalignment and missing text in Go TUI apps.
+        cmd.env(
+            "RUNEWIDTH_EASTASIAN",
+            if self.treat_east_asian_ambiguous_width_as_wide {
+                "1"
+            } else {
+                "0"
+            },
+        );
     }
 }
 
