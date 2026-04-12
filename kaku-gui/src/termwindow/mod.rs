@@ -921,13 +921,6 @@ struct TabDragState {
     has_dragged: bool,
 }
 
-/// Tracks a pending double-click on a tab so that rename requires
-/// two consecutive double-clicks to avoid accidental triggers.
-struct PendingTabRename {
-    tab_idx: usize,
-    at: std::time::Instant,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LineEditorSelectionDirection {
     Left,
@@ -1044,7 +1037,6 @@ pub struct TermWindow {
     dragging: Option<(UIItem, MouseEvent)>,
     split_drag_state: Option<SplitDragState>,
     tab_drag_state: Option<TabDragState>,
-    pending_tab_rename: Option<PendingTabRename>,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
 
@@ -1630,7 +1622,6 @@ impl TermWindow {
             dragging: None,
             split_drag_state: None,
             tab_drag_state: None,
-            pending_tab_rename: None,
             last_ui_item: None,
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
