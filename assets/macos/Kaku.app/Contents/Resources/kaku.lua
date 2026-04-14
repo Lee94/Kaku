@@ -1381,15 +1381,35 @@ local function build_ai_generate_messages(query, cwd, git_branch)
   }
 end
 
-local function show_ai_generating_toast(window, pane)
-  if not window or not pane then
+-- Animates or clears the inline spinner used during `#` AI command generation.
+-- Pass clear=true to erase the spinner line; false (or nil) to draw/advance it.
+local function ctrl_ai_generate_spinner(pane, pane_state, clear)
+  if not pane_state then
     return
   end
-  local ok, err = pcall(function()
-    window:perform_action(wezterm.action.EmitEvent("kaku-toast-ai-generating"), pane)
-  end)
-  if not ok then
-    ai_debug_log("show_ai_generating_toast failed: " .. tostring(err))
+  if clear then
+    if pane_state.spinner_line_active then
+      pcall(function() pane:inject_output("\r\27[K") end)
+      pane_state.spinner_line_active = false
+    end
+    return
+  end
+  if not pane then
+    return
+  end
+  local frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+  if not pane_state.spinner_line_active then
+    local frame = frames[(pane_state.spinner_frame % 10) + 1]
+    pcall(function()
+      pane:inject_output("\r\n\27[38;5;244m" .. frame .. " Kaku AI is generating…\27[0m")
+    end)
+    pane_state.spinner_line_active = true
+  else
+    pane_state.spinner_frame = (pane_state.spinner_frame + 1) % 10
+    local frame = frames[pane_state.spinner_frame + 1]
+    pcall(function()
+      pane:inject_output("\r\27[K\27[38;5;244m" .. frame .. " Kaku AI is generating…\27[0m")
+    end)
   end
 end
 
@@ -1418,11 +1438,12 @@ local function poll_ai_generate_job(window, pane, pane_id, job)
       pane_state.pending_job_id = nil
       cleanup_ai_fix_job_files(job)
       ai_debug_log("ai_generate_job timeout pane_id=" .. pane_id)
+      ctrl_ai_generate_spinner(pane, pane_state, true)
       safe_send_clear(pane)
       inject_ai_status_and_finalize(pane, "Could not generate command right now.")
       return
     end
-    show_ai_generating_toast(window, pane)
+    ctrl_ai_generate_spinner(pane, pane_state, false)
     wezterm.time.call_after(ai_fix_poll_interval_secs, function()
       poll_ai_generate_job(window, pane, pane_id, job)
     end)
@@ -1439,6 +1460,7 @@ local function poll_ai_generate_job(window, pane, pane_id, job)
 
   if status_code ~= 0 then
     ai_debug_log("ai_generate_job failed pane_id=" .. pane_id .. " status=" .. tostring(status_code) .. " err=" .. tostring(stderr))
+    ctrl_ai_generate_spinner(pane, pane_state, true)
     safe_send_clear(pane)
     inject_ai_status_and_finalize(pane, "Could not generate command right now.")
     return
@@ -1447,6 +1469,7 @@ local function poll_ai_generate_job(window, pane, pane_id, job)
   local result, parse_err = parse_ai_fix_response(stdout)
   if not result then
     ai_debug_log("ai_generate_job invalid_response pane_id=" .. pane_id .. " err=" .. tostring(parse_err))
+    ctrl_ai_generate_spinner(pane, pane_state, true)
     safe_send_clear(pane)
     inject_ai_status_and_finalize(pane, "Could not generate command right now.")
     return
@@ -1454,11 +1477,13 @@ local function poll_ai_generate_job(window, pane, pane_id, job)
 
   local command = sanitize_suggested_command(result.command or "")
   if command == "" then
+    ctrl_ai_generate_spinner(pane, pane_state, true)
     safe_send_clear(pane)
     inject_ai_status_and_finalize(pane, normalize_ai_summary(result.summary or "", "No command found for this request."))
     return
   end
 
+  ctrl_ai_generate_spinner(pane, pane_state, true)
   local sent_ok = safe_send_clear(pane, command)
   if not sent_ok then
     inject_ai_status_and_finalize(pane, "Could not inject generated command.")
@@ -2581,21 +2606,23 @@ local function tab_path_parts(tab)
 end
 
 -- ===== Kaku Palette =====
-local KAKU_BLACK = '#15141b'
-local KAKU_ANSI_BLACK = '#110f18'
-local KAKU_WHITE = '#edecee'
-local KAKU_GRAY = '#6d6d6d'
-local KAKU_PURPLE = '#a277ff'
--- Use rgba() here because config::RgbaColor does not accept #RRGGBBAA.
-local KAKU_PURPLE_FADING = 'rgba(61,55,94,0.5)'
-local KAKU_SURFACE = '#1f1d28'
-local KAKU_SURFACE_ACTIVE = '#29263c'
-local KAKU_GREEN = '#61ffca'
-local KAKU_ORANGE = '#ffca85'
-local KAKU_PINK = '#f694ff'
-local KAKU_BLUE = '#5fa8ff'
-local KAKU_BRIGHT_BLUE = '#8cc2ff'
-local KAKU_RED = '#ff6767'
+local KAKU = {
+  BLACK = '#15141b',
+  ANSI_BLACK = '#110f18',
+  WHITE = '#edecee',
+  GRAY = '#6d6d6d',
+  PURPLE = '#a277ff',
+  -- Use rgba() here because config::RgbaColor does not accept #RRGGBBAA.
+  PURPLE_FADING = 'rgba(61,55,94,0.5)',
+  SURFACE = '#1f1d28',
+  SURFACE_ACTIVE = '#29263c',
+  GREEN = '#61ffca',
+  ORANGE = '#ffca85',
+  PINK = '#f694ff',
+  BLUE = '#5fa8ff',
+  BRIGHT_BLUE = '#8cc2ff',
+  RED = '#ff6767',
+}
 
 -- Track bell events per pane for tab notification indicator.
 -- Unlike has_unseen_output (which fires on any output, making the indicator
@@ -2728,7 +2755,7 @@ wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, m
   end
   -- fallback defaults when palette entry or sub-field is absent
   if not fg then
-    fg = tab.is_active and KAKU_WHITE or (hover and KAKU_WHITE or KAKU_GRAY)
+    fg = tab.is_active and KAKU.WHITE or (hover and KAKU.WHITE or KAKU.GRAY)
   end
 
   local pane_keys = tab_pane_keys(tab)
@@ -2743,7 +2770,7 @@ wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, m
   if effective_config.bell_tab_indicator ~= false then
     local tab_bg = tab_bar_colors and tab_bar_colors.background
     local is_light = tab_bg == '#FFFCF0' or tab_bg == '#fffcf0'
-    local dot_color = is_light and '#AD8301' or KAKU_ORANGE
+    local dot_color = is_light and '#AD8301' or KAKU.ORANGE
     return {
       { Attribute = { Intensity = intensity } },
       { Foreground = { Color = fg } },
@@ -2924,6 +2951,7 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
     if gen_state and gen_state.inflight then
       gen_state.inflight = false
       gen_state.pending_job_id = nil
+      ctrl_ai_generate_spinner(pane, gen_state, true)
       ai_debug_log("user-var-changed user typing cancelled ai generate pane_id=" .. pane_id)
       cancelled_any = true
     end
@@ -3099,7 +3127,8 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
   pane_state.inflight = true
   pane_state.inflight_since = now_secs()
   pane_state.pending_job_id = nil
-  show_ai_generating_toast(window, pane)
+  pane_state.spinner_frame = 0
+  pane_state.spinner_line_active = false
 
   local cwd = pane_cwd(pane)
   local git_branch = detect_git_branch(cwd)
@@ -3139,13 +3168,13 @@ wezterm.on('update-right-status', function(window, pane)
   local text = wezterm.strftime('%H:%M')
   if clock_icon ~= '' then
     window:set_right_status(wezterm.format({
-      { Foreground = { Color = KAKU_GRAY } },
+      { Foreground = { Color = KAKU.GRAY } },
       { Text = ' ' .. clock_icon .. ' ' .. text .. ' ' },
     }))
     return
   end
   window:set_right_status(wezterm.format({
-    { Foreground = { Color = KAKU_GRAY } },
+    { Foreground = { Color = KAKU.GRAY } },
     { Text = ' ' .. text .. ' ' },
   }))
 end)
@@ -3417,52 +3446,52 @@ config.window_padding = get_default_padding()
 -- ===== Color Scheme =====
 local kaku_theme = {
   -- Background
-  foreground = KAKU_WHITE,
-  background = KAKU_BLACK,
+  foreground = KAKU.WHITE,
+  background = KAKU.BLACK,
 
   -- Cursor
-  cursor_bg = KAKU_PURPLE,
-  cursor_fg = KAKU_BLACK,
-  cursor_border = KAKU_PURPLE,
+  cursor_bg = KAKU.PURPLE,
+  cursor_fg = KAKU.BLACK,
+  cursor_border = KAKU.PURPLE,
 
   -- Selection
-  selection_bg = KAKU_PURPLE_FADING,
+  selection_bg = KAKU.PURPLE_FADING,
   selection_fg = 'none',
 
   -- Normal colors (ANSI 0-7)
   ansi = {
-    KAKU_ANSI_BLACK, -- black
-    KAKU_RED,     -- red
-    KAKU_GREEN,   -- green
-    KAKU_ORANGE,  -- yellow
-    KAKU_BLUE,    -- blue
-    KAKU_PURPLE,  -- magenta
-    KAKU_GREEN,   -- cyan
-    KAKU_WHITE,   -- white
+    KAKU.ANSI_BLACK, -- black
+    KAKU.RED,     -- red
+    KAKU.GREEN,   -- green
+    KAKU.ORANGE,  -- yellow
+    KAKU.BLUE,    -- blue
+    KAKU.PURPLE,  -- magenta
+    KAKU.GREEN,   -- cyan
+    KAKU.WHITE,   -- white
   },
 
   -- Bright colors (ANSI 8-15)
   brights = {
-    KAKU_GRAY,    -- bright black
-    KAKU_RED,     -- bright red
-    KAKU_GREEN,   -- bright green
-    KAKU_ORANGE,  -- bright yellow
-    KAKU_BRIGHT_BLUE, -- bright blue
-    KAKU_PURPLE,  -- bright magenta
-    KAKU_GREEN,   -- bright cyan
-    KAKU_WHITE,   -- bright white
+    KAKU.GRAY,    -- bright black
+    KAKU.RED,     -- bright red
+    KAKU.GREEN,   -- bright green
+    KAKU.ORANGE,  -- bright yellow
+    KAKU.BRIGHT_BLUE, -- bright blue
+    KAKU.PURPLE,  -- bright magenta
+    KAKU.GREEN,   -- bright cyan
+    KAKU.WHITE,   -- bright white
   },
 
-  split = KAKU_SURFACE_ACTIVE,
+  split = KAKU.SURFACE_ACTIVE,
 
   -- Tab bar colors
   tab_bar = {
-    background = KAKU_BLACK,
-    inactive_tab_edge = KAKU_BLACK,
+    background = KAKU.BLACK,
+    inactive_tab_edge = KAKU.BLACK,
 
     active_tab = {
-      bg_color = KAKU_SURFACE_ACTIVE,
-      fg_color = KAKU_WHITE,
+      bg_color = KAKU.SURFACE_ACTIVE,
+      fg_color = KAKU.WHITE,
       intensity = 'Bold',
       underline = 'None',
       italic = false,
@@ -3470,25 +3499,25 @@ local kaku_theme = {
     },
 
     inactive_tab = {
-      bg_color = KAKU_BLACK,
-      fg_color = KAKU_GRAY,
+      bg_color = KAKU.BLACK,
+      fg_color = KAKU.GRAY,
       intensity = 'Normal',
     },
 
     inactive_tab_hover = {
-      bg_color = KAKU_SURFACE,
-      fg_color = KAKU_WHITE,
+      bg_color = KAKU.SURFACE,
+      fg_color = KAKU.WHITE,
       italic = false,
     },
 
     new_tab = {
-      bg_color = KAKU_BLACK,
-      fg_color = KAKU_GRAY,
+      bg_color = KAKU.BLACK,
+      fg_color = KAKU.GRAY,
     },
 
     new_tab_hover = {
-      bg_color = KAKU_SURFACE,
-      fg_color = KAKU_WHITE,
+      bg_color = KAKU.SURFACE,
+      fg_color = KAKU.WHITE,
     },
   },
 
@@ -3600,10 +3629,10 @@ get_window_frame_colors = function(scheme)
     }
   else
     return {
-      active_titlebar_bg = KAKU_BLACK,
-      inactive_titlebar_bg = KAKU_BLACK,
-      active_titlebar_fg = KAKU_WHITE,
-      inactive_titlebar_fg = KAKU_GRAY,
+      active_titlebar_bg = KAKU.BLACK,
+      inactive_titlebar_bg = KAKU.BLACK,
+      active_titlebar_fg = KAKU.WHITE,
+      inactive_titlebar_fg = KAKU.GRAY,
     }
   end
 end

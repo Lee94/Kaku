@@ -269,6 +269,10 @@ enum ModelFetch {
 /// Maximum number of user+assistant exchange pairs to include in API context.
 const MAX_HISTORY_PAIRS: usize = 10;
 
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Milliseconds between spinner frame advances.
+const SPINNER_INTERVAL_MS: u128 = 100;
+
 /// UI mode: normal chat or conversation picker.
 enum AppMode {
     Chat,
@@ -333,6 +337,10 @@ struct App {
     /// ID of the current active conversation in ai_conversations/.
     active_id: String,
     attachment_picker_index: usize,
+    /// Current braille spinner frame index (0–9).
+    spinner_frame: usize,
+    /// When the last spinner frame advance happened.
+    spinner_tick: Instant,
 }
 
 impl App {
@@ -433,6 +441,22 @@ impl App {
             pending_approval: None,
             active_id,
             attachment_picker_index: 0,
+            spinner_frame: 0,
+            spinner_tick: Instant::now(),
+        }
+    }
+
+    fn spinner_char(&self) -> &'static str {
+        SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()]
+    }
+
+    fn try_advance_spinner(&mut self) -> bool {
+        if self.spinner_tick.elapsed().as_millis() >= SPINNER_INTERVAL_MS {
+            self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+            self.spinner_tick = Instant::now();
+            true
+        } else {
+            false
         }
     }
 
@@ -2359,7 +2383,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         flash_msg.clone()
     } else {
         let suffix = match &app.model_fetch {
-            ModelFetch::Loading => " · loading…".to_string(),
+            ModelFetch::Loading => format!(" · {} loading…", app.spinner_char()),
             ModelFetch::Failed(_) => " · (list failed)".to_string(),
             ModelFetch::Loaded if app.available_models.len() > 1 => {
                 format!(" ({}/{})", app.model_index + 1, app.available_models.len())
@@ -2457,8 +2481,10 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
     let attach_options = app.attachment_picker_options();
     if !slash_options.is_empty() {
         let selected = app.attachment_picker_index.min(slash_options.len() - 1);
-        let mut runs: Vec<(CellAttributes, String)> =
-            vec![(pal.input_cell(), "  ↑↓ navigate · Enter select   ".to_string())];
+        let mut runs: Vec<(CellAttributes, String)> = vec![(
+            pal.input_cell(),
+            "  ↑↓ navigate · Enter select   ".to_string(),
+        )];
         for (idx, (label, desc)) in slash_options.iter().enumerate() {
             if idx > 0 {
                 runs.push((pal.input_cell(), "  ".to_string()));
@@ -2473,8 +2499,10 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         push_picker_row(&mut changes, sep_row, inner_w, pal, runs);
     } else if !attach_options.is_empty() {
         let selected = app.attachment_picker_index.min(attach_options.len() - 1);
-        let mut runs: Vec<(CellAttributes, String)> =
-            vec![(pal.input_cell(), "  ↑↓ navigate · Tab select   ".to_string())];
+        let mut runs: Vec<(CellAttributes, String)> = vec![(
+            pal.input_cell(),
+            "  ↑↓ navigate · Tab select   ".to_string(),
+        )];
         for (idx, option) in attach_options.iter().enumerate() {
             if idx > 0 {
                 runs.push((pal.input_cell(), "  ".to_string()));
@@ -2521,7 +2549,13 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         changes.push(Change::Text("│".to_string()));
         None // hidden
     } else {
-        let prompt = if app.is_streaming { "  ⏳ " } else { "  > " };
+        let streaming_prompt;
+        let prompt = if app.is_streaming {
+            streaming_prompt = format!("  {} ", app.spinner_char());
+            streaming_prompt.as_str()
+        } else {
+            "  > "
+        };
         let input_display = format!("{}{}", prompt, app.input);
         let input_padded = format!("{:<width$}", input_display, width = inner_w);
         changes.push(Change::AllAttributes(pal.input_cell()));
@@ -3134,7 +3168,14 @@ pub fn ai_chat_overlay(
             Some(_) => {}
             None => {
                 // Timeout: if streaming or queue draining, trigger a redraw.
-                if app.is_streaming || !app.grapheme_queue.is_empty() || app.stream_pending_done {
+                let spinner_changed = (app.is_streaming
+                    || matches!(app.model_fetch, ModelFetch::Loading))
+                    && app.try_advance_spinner();
+                if app.is_streaming
+                    || !app.grapheme_queue.is_empty()
+                    || app.stream_pending_done
+                    || spinner_changed
+                {
                     needs_redraw = true;
                 }
             }

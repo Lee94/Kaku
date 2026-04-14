@@ -675,7 +675,15 @@ pub fn execute(
             let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
             let max_results = args["max_results"].as_u64().unwrap_or(100) as usize;
             let glob_filter = args["glob"].as_str();
-            exec_grep_search(pattern, search_path, glob_filter, context_lines, case_insensitive, max_results, cwd)?
+            exec_grep_search(
+                pattern,
+                search_path,
+                glob_filter,
+                context_lines,
+                case_insensitive,
+                max_results,
+                cwd,
+            )?
         }
         "http_request" => {
             let method = args["method"].as_str().context("missing method")?;
@@ -766,7 +774,12 @@ fn fetch_markdown_default(url: &str) -> Result<String> {
 
 // ─── Web search providers ─────────────────────────────────────────────────────
 
-fn search_brave(query: &str, api_key: &str, kind: Option<&str>, freshness: Option<&str>) -> Result<String> {
+fn search_brave(
+    query: &str,
+    api_key: &str,
+    kind: Option<&str>,
+    freshness: Option<&str>,
+) -> Result<String> {
     // Use dedicated news endpoint when kind="news"; otherwise standard web search.
     let endpoint = if kind == Some("news") {
         "https://api.search.brave.com/res/v1/news/search"
@@ -785,14 +798,24 @@ fn search_brave(query: &str, api_key: &str, kind: Option<&str>, freshness: Optio
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        anyhow::bail!("brave search returned {}: {}", status, body.chars().take(300).collect::<String>());
+        anyhow::bail!(
+            "brave search returned {}: {}",
+            status,
+            body.chars().take(300).collect::<String>()
+        );
     }
     let json: serde_json::Value = resp.json().context("parse brave response")?;
     // News endpoint returns json["results"]; web endpoint returns json["web"]["results"].
     let results = if kind == Some("news") {
-        json["results"].as_array().map(|a| a.as_slice()).unwrap_or(&[])
+        json["results"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
     } else {
-        json["web"]["results"].as_array().map(|a| a.as_slice()).unwrap_or(&[])
+        json["web"]["results"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
     };
     if results.is_empty() {
         return Ok("No results found.".into());
@@ -845,7 +868,12 @@ fn search_pipellm(query: &str, api_key: &str, kind: Option<&str>) -> Result<Stri
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            last_err = format!("{} from {}: {}", status, base, body.chars().take(300).collect::<String>());
+            last_err = format!(
+                "{} from {}: {}",
+                status,
+                base,
+                body.chars().take(300).collect::<String>()
+            );
             continue;
         }
         let json: serde_json::Value = resp.json().context("parse pipellm response")?;
@@ -861,8 +889,14 @@ fn search_pipellm(query: &str, api_key: &str, kind: Option<&str>) -> Result<Stri
         let mut out = String::new();
         for r in results.iter().take(10) {
             let title = r["title"].as_str().unwrap_or("(no title)");
-            let url = r["link"].as_str().or_else(|| r["url"].as_str()).unwrap_or("");
-            let snippet = r["snippet"].as_str().or_else(|| r["content"].as_str()).unwrap_or("");
+            let url = r["link"]
+                .as_str()
+                .or_else(|| r["url"].as_str())
+                .unwrap_or("");
+            let snippet = r["snippet"]
+                .as_str()
+                .or_else(|| r["content"].as_str())
+                .unwrap_or("");
             out.push_str(&format!("- **{}** <{}>\n  {}\n", title, url, snippet));
         }
         return Ok(out);
@@ -914,7 +948,11 @@ fn search_tavily(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        anyhow::bail!("tavily search returned {}: {}", status, body.chars().take(300).collect::<String>());
+        anyhow::bail!(
+            "tavily search returned {}: {}",
+            status,
+            body.chars().take(300).collect::<String>()
+        );
     }
     let json: serde_json::Value = resp.json().context("parse tavily response")?;
     let results = json["results"]
@@ -950,7 +988,10 @@ fn exec_grep_search(
     cwd: &str,
 ) -> Result<String> {
     // Use ripgrep if available, fall back to grep.
-    let rg = std::process::Command::new("rg").arg("--version").output().is_ok();
+    let rg = std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_ok();
     let abs_path = if search_path.starts_with("~/") || search_path == "~" {
         let home = std::env::var("HOME").context("HOME not set")?;
         if search_path == "~" {
@@ -998,7 +1039,10 @@ fn exec_grep_search(
     if text.trim().is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stderr.trim().is_empty() {
-            return Ok(format!("No matches. ({})", stderr.trim().chars().take(200).collect::<String>()));
+            return Ok(format!(
+                "No matches. ({})",
+                stderr.trim().chars().take(200).collect::<String>()
+            ));
         }
         return Ok("No matches found.".into());
     }
@@ -1074,7 +1118,10 @@ fn exec_http_request(
         .iter()
         .filter(|(k, _)| {
             let name = k.as_str().to_ascii_lowercase();
-            matches!(name.as_str(), "content-type" | "content-length" | "x-request-id" | "x-ratelimit-remaining")
+            matches!(
+                name.as_str(),
+                "content-type" | "content-length" | "x-request-id" | "x-ratelimit-remaining"
+            )
         })
         .map(|(k, v)| format!("{}: {}", k, v.to_str().unwrap_or("?")))
         .collect();
@@ -1094,7 +1141,6 @@ fn exec_http_request(
     }
     Ok(out)
 }
-
 
 /// Handles `~/…` expansion and relative paths (resolved against `cwd`).
 fn resolve(path: &str, cwd: &str) -> Result<PathBuf> {
@@ -1137,10 +1183,16 @@ fn exec_read_url(url: &str, provider: &str, api_key: &str) -> Result<String> {
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let body = resp.text().unwrap_or_default();
-                    last_err = format!("{} from {}: {}", status, base, body.chars().take(300).collect::<String>());
+                    last_err = format!(
+                        "{} from {}: {}",
+                        status,
+                        base,
+                        body.chars().take(300).collect::<String>()
+                    );
                     continue;
                 }
-                let json: serde_json::Value = resp.json().context("parse pipellm reader response")?;
+                let json: serde_json::Value =
+                    resp.json().context("parse pipellm reader response")?;
                 // Response may be plain text or JSON with "content"/"text" field.
                 let text = json["content"]
                     .as_str()
@@ -1154,7 +1206,10 @@ fn exec_read_url(url: &str, provider: &str, api_key: &str) -> Result<String> {
                 return Ok("Page returned empty content.".into());
             }
             // Both domains failed — fall back to generic reader.
-            log::warn!("pipellm reader failed ({}), falling back to generic fetch", last_err);
+            log::warn!(
+                "pipellm reader failed ({}), falling back to generic fetch",
+                last_err
+            );
             fetch_markdown_default(url)
         }
         "tavily" => {
@@ -1169,7 +1224,11 @@ fn exec_read_url(url: &str, provider: &str, api_key: &str) -> Result<String> {
                 let status = resp.status();
                 let body = resp.text().unwrap_or_default();
                 // Fall back on failure rather than hard-erroring.
-                log::warn!("tavily extract returned {} ({}), falling back to generic fetch", status, body.trim().chars().take(200).collect::<String>());
+                log::warn!(
+                    "tavily extract returned {} ({}), falling back to generic fetch",
+                    status,
+                    body.trim().chars().take(200).collect::<String>()
+                );
                 return fetch_markdown_default(url);
             }
             let json: serde_json::Value = resp.json().context("parse tavily extract response")?;
