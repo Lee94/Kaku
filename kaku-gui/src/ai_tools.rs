@@ -417,7 +417,7 @@ pub fn execute(
             }
             // Read at most MAX_RESULT_BYTES + 512 bytes to avoid OOM on large files.
             // The +512 gives enough slack to find a valid UTF-8 char boundary.
-            let mut file =
+            let file =
                 std::fs::File::open(&path).with_context(|| format!("read {}", path.display()))?;
             let mut buf = Vec::with_capacity(MAX_RESULT_BYTES + 512);
             file.take((MAX_RESULT_BYTES + 512) as u64)
