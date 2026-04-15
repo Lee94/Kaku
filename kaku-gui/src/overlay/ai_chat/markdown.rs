@@ -331,6 +331,35 @@ pub(crate) fn wrap_segments(segments: &[InlineSpan], width: usize) -> Vec<Vec<In
                 continue;
             }
         }
+        // Hard-break oversized non-whitespace tokens (long URLs, CJK runs) by
+        // slicing at grapheme boundaries so they never exceed `width`.
+        if !is_ws && w > width {
+            let mut chunk = String::new();
+            let mut chunk_w = 0usize;
+            for g in text.graphemes(true) {
+                let gw = unicode_column_width(g, None);
+                if chunk_w + gw > width && !chunk.is_empty() {
+                    // Flush the current line before starting a new chunk.
+                    if !current.is_empty() {
+                        lines.push(std::mem::take(&mut current));
+                        current_w = 0;
+                    }
+                    lines.push(vec![InlineSpan {
+                        text: std::mem::take(&mut chunk),
+                        style,
+                    }]);
+                    chunk_w = 0;
+                }
+                chunk.push_str(g);
+                chunk_w += gw;
+            }
+            // Remaining partial chunk continues on current line.
+            if !chunk.is_empty() {
+                merge_push(&mut current, InlineSpan { text: chunk, style });
+                current_w += chunk_w;
+            }
+            continue;
+        }
         merge_push(&mut current, InlineSpan { text, style });
         current_w += w;
     }

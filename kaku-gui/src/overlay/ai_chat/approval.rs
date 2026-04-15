@@ -298,10 +298,47 @@ fn has_output_flag(tokens: &[String], flags: &[&str]) -> bool {
 
 pub(crate) fn build_system_prompt(ctx: &TerminalContext) -> String {
     let mut s = String::from(include_str!("prompt.txt"));
+
+    let now = chrono::Local::now();
+    s.push_str(&format!(
+        "\nCurrent date/time: {} (local)\n",
+        now.format("%Y-%m-%d %a %H:%M %z"),
+    ));
+    if let Some(tz) = macos_timezone() {
+        s.push_str(&format!("Timezone: {}\n", tz));
+    }
+    if let Some(locale) = user_locale() {
+        s.push_str(&format!("User locale: {}\n", locale));
+    }
+
     if !ctx.cwd.is_empty() {
-        s.push_str(&format!("\nCurrent directory: {}\n", ctx.cwd));
+        s.push_str(&format!("Current directory: {}\n", ctx.cwd));
     }
     s
+}
+
+/// Read the IANA timezone name from /etc/localtime symlink.
+/// Returns None if the link is missing or the path doesn't contain a Region/City.
+fn macos_timezone() -> Option<String> {
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let parts: Vec<&str> = target
+        .iter()
+        .filter_map(|c| c.to_str())
+        .collect();
+    let n = parts.len();
+    if n >= 2 {
+        Some(format!("{}/{}", parts[n - 2], parts[n - 1]))
+    } else {
+        None
+    }
+}
+
+/// Read locale from environment variables (no subprocess, no permissions).
+fn user_locale() -> Option<String> {
+    std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LANG"))
+        .ok()
+        .map(|s| s.split('.').next().unwrap_or(&s).to_string())
 }
 
 /// Wraps the visible terminal snapshot in a sandboxed user message so it cannot

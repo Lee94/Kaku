@@ -2113,31 +2113,16 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         }
         push_picker_row(&mut changes, sep_row, inner_w, pal, runs);
     } else {
-        // No active picker: show available context-attachment hints so users
-        // discover the @ prefix without having to guess.
+        // No active picker: plain separator; hints are shown as input placeholder.
         changes.push(Change::CursorPosition {
             x: Position::Absolute(0),
             y: Position::Absolute(sep_row),
         });
-        let hint_options = app.available_attachment_options();
-        if hint_options.is_empty() {
-            changes.push(Change::AllAttributes(pal.border_dim_cell()));
-            changes.push(Change::Text(format!(
-                "├{}┤",
-                "─".repeat(inner_w.saturating_sub(0))
-            )));
-        } else {
-            let tokens: String = hint_options
-                .iter()
-                .map(|o| o.label)
-                .collect::<Vec<_>>()
-                .join("  ");
-            let hint = format!("  {}  ·  type @ to attach  ", tokens);
-            let hint_width = unicode_column_width(&hint, None);
-            let fill = "─".repeat(inner_w.saturating_sub(2 + hint_width.min(inner_w)));
-            changes.push(Change::AllAttributes(pal.border_dim_cell()));
-            changes.push(Change::Text(format!("├─{}{}┤", hint, fill)));
-        }
+        changes.push(Change::AllAttributes(pal.border_dim_cell()));
+        changes.push(Change::Text(format!(
+            "├{}┤",
+            "─".repeat(inner_w.saturating_sub(0))
+        )));
     }
 
     // 5. Input row — or approval prompt when agent is waiting for confirmation.
@@ -3167,6 +3152,41 @@ mod markdown_tests {
         let segs = vec![plain("anything")];
         let wrapped = wrap_segments(&segs, 0);
         assert_eq!(wrapped.len(), 1);
+    }
+
+    #[test]
+    fn wrap_oversized_cjk_token_does_not_exceed_width() {
+        // A run of CJK characters with no whitespace must be cut into lines
+        // where each line's visual width is <= width (each CJK char = 2 cols).
+        let text = "这是一段很长的中文内容不包含任何空格直接连续输出测试换行功能是否正确";
+        let segs = vec![plain(text)];
+        let wrapped = wrap_segments(&segs, 10);
+        assert!(wrapped.len() > 1, "expected multiple wrapped lines for wide CJK run");
+        for line in &wrapped {
+            let w: usize = line.iter().map(|s| unicode_column_width(&s.text, None)).sum();
+            assert!(
+                w <= 10,
+                "line exceeds width=10: w={w} text={:?}",
+                line.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_oversized_url_does_not_exceed_width() {
+        // A long URL (no spaces) must be hard-broken so no line exceeds width.
+        let url = "https://example.com/very/long/path/to/some/resource?query=param&other=value";
+        let segs = vec![plain(url)];
+        let wrapped = wrap_segments(&segs, 20);
+        assert!(wrapped.len() > 1, "expected multiple wrapped lines for long URL");
+        for line in &wrapped {
+            let w: usize = line.iter().map(|s| unicode_column_width(&s.text, None)).sum();
+            assert!(
+                w <= 20,
+                "line exceeds width=20: w={w} text={:?}",
+                line.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
