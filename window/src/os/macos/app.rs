@@ -127,6 +127,8 @@ thread_local! {
 lazy_static::lazy_static! {
     static ref PENDING_SERVICE_OPENS: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
     static ref PENDING_TTY_ACTIVATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static ref PENDING_PANE_ID_ACTIVATIONS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    static ref PENDING_TAB_ID_ACTIVATIONS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
     static ref LAST_SERVICE_OPEN_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
     static ref GLOBAL_HOTKEY_STATE: Mutex<GlobalHotKeyState> =
         Mutex::new(GlobalHotKeyState::default());
@@ -949,6 +951,38 @@ mod tests {
 
         assert_eq!(normalized, path);
     }
+
+    #[test]
+    fn parse_url_action_supports_open_tab_by_tty() {
+        let url = Url::parse("kaku://open-tab?tty=/dev/ttys012").expect("valid url");
+        assert_eq!(
+            parse_url_action(&url),
+            Some(UrlAction::OpenTabByTty("/dev/ttys012".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_url_action_supports_activate_pane_path_form() {
+        let url = Url::parse("kaku://activate-pane/42").expect("valid url");
+        assert_eq!(
+            parse_url_action(&url),
+            Some(UrlAction::ActivatePaneById(42))
+        );
+    }
+
+    #[test]
+    fn parse_url_action_supports_activate_tab_query_form() {
+        let url = Url::parse("kaku://activate-tab?tab_id=7").expect("valid url");
+        assert_eq!(parse_url_action(&url), Some(UrlAction::ActivateTabById(7)));
+    }
+
+    #[test]
+    fn parse_url_action_rejects_missing_or_invalid_ids() {
+        let missing = Url::parse("kaku://activate-pane").expect("valid url");
+        let invalid = Url::parse("kaku://activate-tab/not-a-number").expect("valid url");
+        assert_eq!(parse_url_action(&missing), None);
+        assert_eq!(parse_url_action(&invalid), None);
+    }
 }
 
 extern "C" fn application_open_untitled_file(
@@ -1182,6 +1216,38 @@ fn dispatch_or_queue_tty_activation(tty: String) {
     PENDING_TTY_ACTIVATIONS.lock().unwrap().push(tty);
 }
 
+fn dispatch_or_queue_pane_id_activation(pane_id: usize) {
+    if let Some(conn) = Connection::get() {
+        if crate::connection::app_event_handler_ready() {
+            conn.dispatch_app_event(ApplicationEvent::ActivatePaneById(pane_id));
+            return;
+        }
+    }
+
+    if Connection::get().is_some() {
+        log::debug!("pane-id activation queued until app event handler is ready");
+    } else {
+        log::debug!("pane-id activation queued until GUI connection is ready");
+    }
+    PENDING_PANE_ID_ACTIVATIONS.lock().unwrap().push(pane_id);
+}
+
+fn dispatch_or_queue_tab_id_activation(tab_id: usize) {
+    if let Some(conn) = Connection::get() {
+        if crate::connection::app_event_handler_ready() {
+            conn.dispatch_app_event(ApplicationEvent::ActivateTabById(tab_id));
+            return;
+        }
+    }
+
+    if Connection::get().is_some() {
+        log::debug!("tab-id activation queued until app event handler is ready");
+    } else {
+        log::debug!("tab-id activation queued until GUI connection is ready");
+    }
+    PENDING_TAB_ID_ACTIVATIONS.lock().unwrap().push(tab_id);
+}
+
 pub(crate) fn flush_pending_service_opens() {
     let pending = {
         let mut queued = PENDING_SERVICE_OPENS.lock().unwrap();
@@ -1191,8 +1257,20 @@ pub(crate) fn flush_pending_service_opens() {
         let mut queued = PENDING_TTY_ACTIVATIONS.lock().unwrap();
         std::mem::take(&mut *queued)
     };
+    let pending_pane_ids = {
+        let mut queued = PENDING_PANE_ID_ACTIVATIONS.lock().unwrap();
+        std::mem::take(&mut *queued)
+    };
+    let pending_tab_ids = {
+        let mut queued = PENDING_TAB_ID_ACTIVATIONS.lock().unwrap();
+        std::mem::take(&mut *queued)
+    };
 
-    if pending.is_empty() && pending_ttys.is_empty() {
+    if pending.is_empty()
+        && pending_ttys.is_empty()
+        && pending_pane_ids.is_empty()
+        && pending_tab_ids.is_empty()
+    {
         return;
     }
 
@@ -1208,39 +1286,77 @@ pub(crate) fn flush_pending_service_opens() {
         for tty in pending_ttys {
             conn.dispatch_app_event(ApplicationEvent::ActivatePaneForTty(tty));
         }
+        for pane_id in pending_pane_ids {
+            conn.dispatch_app_event(ApplicationEvent::ActivatePaneById(pane_id));
+        }
+        for tab_id in pending_tab_ids {
+            conn.dispatch_app_event(ApplicationEvent::ActivateTabById(tab_id));
+        }
     } else {
         let mut queued = PENDING_SERVICE_OPENS.lock().unwrap();
         queued.extend(pending);
         let mut queued_ttys = PENDING_TTY_ACTIVATIONS.lock().unwrap();
         queued_ttys.extend(pending_ttys);
+        let mut queued_panes = PENDING_PANE_ID_ACTIVATIONS.lock().unwrap();
+        queued_panes.extend(pending_pane_ids);
+        let mut queued_tabs = PENDING_TAB_ID_ACTIVATIONS.lock().unwrap();
+        queued_tabs.extend(pending_tab_ids);
     }
 }
 
-fn parse_url_action(url: &Url) -> Option<(&str, String)> {
+#[derive(Debug, PartialEq, Eq)]
+enum UrlAction {
+    OpenTabByTty(String),
+    ActivatePaneById(usize),
+    ActivateTabById(usize),
+}
+
+fn parse_id_from_url(url: &Url, path_segment: Option<&str>, query_key: &str) -> Option<usize> {
+    let raw = path_segment
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            url.query_pairs()
+                .find_map(|(key, value)| (key == query_key).then(|| value.into_owned()))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })?;
+    raw.parse::<usize>().ok()
+}
+
+fn parse_url_action(url: &Url) -> Option<UrlAction> {
     if url.scheme() != "kaku" {
         return None;
     }
 
-    let action = url.host_str().filter(|host| !host.is_empty()).or_else(|| {
-        url.path_segments()
-            .and_then(|mut segments| segments.next())
-            .filter(|segment| !segment.is_empty())
-    })?;
+    let mut segments = url.path_segments().into_iter().flatten();
+    let action = url
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .or_else(|| segments.find(|segment| !segment.is_empty()))?;
+    let path_arg = segments.find(|segment| !segment.is_empty());
 
-    if action != "open-tab" {
-        return None;
+    match action {
+        "open-tab" => {
+            let tty = url
+                .query_pairs()
+                .find_map(|(key, value)| (key == "tty").then(|| value.into_owned()))?
+                .trim()
+                .to_string();
+            if tty.is_empty() {
+                return None;
+            }
+            Some(UrlAction::OpenTabByTty(tty))
+        }
+        "activate-pane" => {
+            parse_id_from_url(url, path_arg, "pane_id").map(UrlAction::ActivatePaneById)
+        }
+        "activate-tab" => {
+            parse_id_from_url(url, path_arg, "tab_id").map(UrlAction::ActivateTabById)
+        }
+        _ => None,
     }
-
-    let tty = url
-        .query_pairs()
-        .find_map(|(key, value)| (key == "tty").then(|| value.into_owned()))?
-        .trim()
-        .to_string();
-    if tty.is_empty() {
-        return None;
-    }
-
-    Some((action, tty))
 }
 
 extern "C" fn application_open_urls(
@@ -1276,11 +1392,18 @@ extern "C" fn application_open_urls(
                     }
 
                     match parse_url_action(&parsed) {
-                        Some(("open-tab", tty)) => {
+                        Some(UrlAction::OpenTabByTty(tty)) => {
                             log::debug!("application_open_urls open-tab tty={tty}");
                             dispatch_or_queue_tty_activation(tty);
                         }
-                        Some((_action, _)) => {}
+                        Some(UrlAction::ActivatePaneById(pane_id)) => {
+                            log::debug!("application_open_urls activate-pane pane_id={pane_id}");
+                            dispatch_or_queue_pane_id_activation(pane_id);
+                        }
+                        Some(UrlAction::ActivateTabById(tab_id)) => {
+                            log::debug!("application_open_urls activate-tab tab_id={tab_id}");
+                            dispatch_or_queue_tab_id_activation(tab_id);
+                        }
                         None => {
                             log::warn!("application_open_urls unsupported url: {raw_url}");
                         }

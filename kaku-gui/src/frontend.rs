@@ -7,6 +7,8 @@ use anyhow::{Context, Error};
 use config::keyassignment::{KeyAssignment, SpawnCommand, SpawnTabDomain};
 use config::{ConfigSubscription, NotificationHandling};
 use mux::client::ClientId;
+use mux::pane::PaneId;
+use mux::tab::TabId;
 use mux::window::WindowId as MuxWindowId;
 use mux::{Mux, MuxNotification};
 use promise::{Future, Promise};
@@ -147,9 +149,11 @@ pub fn open_kaku_config() {
                 args: Some(vec![kaku_bin, "config".to_string()]),
                 ..Default::default()
             },
-            SpawnWhere::NewTab,
+            // Keep settings isolated from active coding tabs so ESC inside
+            // config does not race with focus return on tab close.
+            SpawnWhere::NewWindow,
             size,
-            try_front_end().and_then(|fe| fe.gui_windows().first().map(|w| w.mux_window_id)),
+            None,
             term_config,
         );
     })
@@ -652,11 +656,62 @@ impl GuiFrontEnd {
         }
 
         if let Some((_domain, window_id, _tab_id)) = mux.resolve_pane_id(pane_id) {
-            if let Some(fe) = try_front_end() {
-                if let Some(gui_window) = fe.gui_window_for_mux_window(window_id) {
-                    gui_window.window.focus();
-                }
+            Self::focus_gui_window(window_id);
+        }
+    }
+
+    fn focus_gui_window(window_id: MuxWindowId) {
+        if let Some(fe) = try_front_end() {
+            if let Some(gui_window) = fe.gui_window_for_mux_window(window_id) {
+                gui_window.window.focus();
             }
+        }
+    }
+
+    fn activate_pane_by_id(pane_id: usize) {
+        let pane_id = PaneId::new(pane_id);
+        let mux = Mux::get();
+
+        if mux.get_pane(pane_id).is_none() {
+            log::warn!("ActivatePaneById called with unknown pane_id={pane_id}");
+            return;
+        }
+
+        if let Err(err) = mux.focus_pane_and_containing_tab(pane_id) {
+            log::error!("Failed to focus pane {pane_id}: {err:#}");
+            return;
+        }
+
+        if let Some((_domain, window_id, _tab_id)) = mux.resolve_pane_id(pane_id) {
+            Self::focus_gui_window(window_id);
+        }
+    }
+
+    fn activate_tab_by_id(tab_id: usize) {
+        let tab_id = TabId::new(tab_id);
+        let mux = Mux::get();
+
+        let Some(tab) = mux.get_tab(tab_id) else {
+            log::warn!("ActivateTabById called with unknown tab_id={tab_id}");
+            return;
+        };
+
+        let pane_id = tab
+            .get_active_pane()
+            .map(|pane| pane.pane_id())
+            .or_else(|| tab.iter_panes().first().map(|pos| pos.pane.pane_id()));
+        let Some(pane_id) = pane_id else {
+            log::warn!("ActivateTabById found no panes in tab_id={tab_id}");
+            return;
+        };
+
+        if let Err(err) = mux.focus_pane_and_containing_tab(pane_id) {
+            log::error!("Failed to focus tab {tab_id} via pane {pane_id}: {err:#}");
+            return;
+        }
+
+        if let Some(window_id) = mux.window_containing_tab(tab_id) {
+            Self::focus_gui_window(window_id);
         }
     }
 
@@ -670,6 +725,12 @@ impl GuiFrontEnd {
             }
             ApplicationEvent::ActivatePaneForTty(tty_name) => {
                 Self::activate_tab_for_tty(tty_name);
+            }
+            ApplicationEvent::ActivatePaneById(pane_id) => {
+                Self::activate_pane_by_id(pane_id);
+            }
+            ApplicationEvent::ActivateTabById(tab_id) => {
+                Self::activate_tab_by_id(tab_id);
             }
             ApplicationEvent::PerformKeyAssignment(action) => {
                 // We should only get here when there are no windows open

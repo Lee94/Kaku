@@ -44,6 +44,10 @@ pub enum ApplicationEvent {
     OpenCommandScriptInTab(String),
     /// The system requests focusing the tab/pane that owns this tty.
     ActivatePaneForTty(String),
+    /// The system requests focusing a pane by pane id.
+    ActivatePaneById(usize),
+    /// The system requests focusing a tab by tab id.
+    ActivateTabById(usize),
     PerformKeyAssignment(KeyAssignment),
 }
 
