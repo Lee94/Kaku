@@ -805,7 +805,7 @@ pub fn start_tunnel(tunnel_url: String) {
         let tunnel_throttle: PaneThrottle = Arc::new(Mutex::new(HashMap::new()));
         mux.subscribe(move |notification| {
             if let MuxNotification::PaneOutput(pane_id) = notification {
-                let pid: usize = pane_id.into();
+                let pid: usize = (*pane_id).into();
                 if tx_for_sub.receiver_count() > 0 {
                     {
                         let mut times = tunnel_throttle.lock();
@@ -999,13 +999,13 @@ pub fn start() {
             match notification {
                 MuxNotification::PaneOutput(pane_id) => {
                     on_pane_output(
-                        pane_id.into(),
+                        (*pane_id).into(),
                         senders_for_sub.clone(),
                         throttle_for_sub.clone(),
                     );
                 }
                 MuxNotification::PaneRemoved(pane_id) => {
-                    let id: usize = pane_id.into();
+                    let id: usize = (*pane_id).into();
                     senders_for_sub.lock().remove(&id);
                     throttle_for_sub.lock().remove(&id);
                 }

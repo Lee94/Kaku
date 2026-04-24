@@ -399,7 +399,7 @@ impl ClientDomain {
     pub fn new(config: ClientDomainConfig) -> Self {
         let local_domain_id = alloc_domain_id();
         let label = config.label();
-        Mux::get().subscribe(move |notif| mux_notify_client_domain(local_domain_id, notif));
+        Mux::get().subscribe(move |notif| mux_notify_client_domain(local_domain_id, notif.clone()));
         Self {
             config,
             label,

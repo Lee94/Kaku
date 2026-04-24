@@ -331,6 +331,7 @@ impl GuiFrontEnd {
         });
 
         mux.subscribe(move |n| {
+            let n = n.clone();
             match n {
                 MuxNotification::WorkspaceRenamed {
                     old_workspace,

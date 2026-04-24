@@ -570,6 +570,7 @@ impl TmuxDomainState {
         let mux = Mux::get();
         let domain_id = self.domain_id;
         mux.subscribe(move |n| {
+            let n = n.clone();
             promise::spawn::spawn_into_main_thread(async move {
                 let mux = Mux::get();
                 let domain = match mux.get_domain(domain_id) {

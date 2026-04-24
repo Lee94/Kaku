@@ -2627,6 +2627,7 @@ impl TermWindow {
 
             let window = window.clone();
             let dead = dead.clone();
+            let n = n.clone();
             promise::spawn::spawn_into_main_thread(async move {
                 Self::mux_pane_output_event_callback(n, &window, mux_window_id, &dead)
             })

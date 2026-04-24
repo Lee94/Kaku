@@ -61,7 +61,7 @@ where
     {
         let mux = Mux::get();
         let tx = item_tx.clone();
-        mux.subscribe(move |n| tx.try_send(Item::Notif(n)).is_ok());
+        mux.subscribe(move |n| tx.try_send(Item::Notif(n.clone())).is_ok());
     }
 
     loop {
