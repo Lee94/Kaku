@@ -603,6 +603,7 @@ pub fn execute(
         }
         "fs_list" => {
             let path = resolve(args["path"].as_str().context("missing path")?, cwd)?;
+            reject_if_sensitive(&path)?;
             let mut entries: Vec<String> = std::fs::read_dir(&path)
                 .with_context(|| format!("list {}", path.display()))?
                 .filter_map(|e| e.ok())
@@ -644,11 +645,13 @@ pub fn execute(
         }
         "fs_mkdir" => {
             let path = resolve(args["path"].as_str().context("missing path")?, cwd)?;
+            reject_if_sensitive(&path)?;
             std::fs::create_dir_all(&path).with_context(|| format!("mkdir {}", path.display()))?;
             format!("Created {}", path.display())
         }
         "fs_delete" => {
             let path = resolve(args["path"].as_str().context("missing path")?, cwd)?;
+            reject_if_sensitive(&path)?;
             if path.is_dir() {
                 std::fs::remove_dir_all(&path)
                     .with_context(|| format!("rmdir {}", path.display()))?;
@@ -1757,6 +1760,48 @@ mod tests {
         let mut cwd = "/tmp".to_string();
         let err = execute("fs_read", &args, &mut cwd, &dummy_config(), &no_cancel())
             .expect_err("fs_read should refuse ~/.ssh paths");
+        assert!(
+            err.to_string().contains("protected secret location"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fs_list_refuses_ssh_directory() {
+        let home = std::env::var("HOME").expect("HOME not set");
+        let args = serde_json::json!({"path": format!("{}/.ssh", home)});
+        let mut cwd = "/tmp".to_string();
+        let err = execute("fs_list", &args, &mut cwd, &dummy_config(), &no_cancel())
+            .expect_err("fs_list should refuse ~/.ssh");
+        assert!(
+            err.to_string().contains("protected secret location"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fs_mkdir_refuses_ssh_directory() {
+        let home = std::env::var("HOME").expect("HOME not set");
+        let args = serde_json::json!({"path": format!("{}/.ssh/evil", home)});
+        let mut cwd = "/tmp".to_string();
+        let err = execute("fs_mkdir", &args, &mut cwd, &dummy_config(), &no_cancel())
+            .expect_err("fs_mkdir should refuse ~/.ssh/*");
+        assert!(
+            err.to_string().contains("protected secret location"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fs_delete_refuses_ssh_file() {
+        let home = std::env::var("HOME").expect("HOME not set");
+        let args = serde_json::json!({"path": format!("{}/.ssh/id_rsa", home)});
+        let mut cwd = "/tmp".to_string();
+        let err = execute("fs_delete", &args, &mut cwd, &dummy_config(), &no_cancel())
+            .expect_err("fs_delete should refuse ~/.ssh/*");
         assert!(
             err.to_string().contains("protected secret location"),
             "unexpected error: {}",
