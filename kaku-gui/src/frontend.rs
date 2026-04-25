@@ -180,6 +180,23 @@ pub fn restart_to_update() {
         staged_update_available, write_update_helper_script,
     };
 
+    // Toast click can fire twice (rapid double-click, or two GUI processes
+    // both registering the click callback). Without this guard, two helper
+    // scripts race to ditto into the same Kaku.app.
+    static UPDATE_RUNNING: AtomicBool = AtomicBool::new(false);
+    if UPDATE_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        log::info!("restart_to_update: already running, ignoring");
+        return;
+    }
+
+    // Reset the guard on any non-success exit so the user can retry. On
+    // success the helper kills us before the function returns, so the guard
+    // value no longer matters.
+    let release_guard = || UPDATE_RUNNING.store(false, Ordering::SeqCst);
+
     fn fallback_with_toast(msg: &str) {
         log::error!("restart_to_update: {}", msg);
         wezterm_toast_notification::persistent_toast_notification(
@@ -194,6 +211,7 @@ pub fn restart_to_update() {
         None => {
             log::warn!("restart_to_update: no staged update available, falling back to menu flow");
             run_kaku_update_from_menu();
+            release_guard();
             return;
         }
     };
@@ -202,6 +220,7 @@ pub fn restart_to_update() {
         Ok(p) => p,
         Err(e) => {
             fallback_with_toast(&format!("failed to resolve target app: {}", e));
+            release_guard();
             return;
         }
     };
@@ -213,6 +232,7 @@ pub fn restart_to_update() {
     let update_root = config::DATA_DIR.join("updates");
     if let Err(e) = config::create_user_owned_dirs(&update_root) {
         fallback_with_toast(&format!("failed to create updates dir: {}", e));
+        release_guard();
         return;
     }
     let now = std::time::SystemTime::now()
@@ -223,6 +243,7 @@ pub fn restart_to_update() {
 
     if let Err(e) = write_update_helper_script(&helper_script) {
         fallback_with_toast(&format!("failed to write helper script: {}", e));
+        release_guard();
         return;
     }
 
@@ -234,6 +255,7 @@ pub fn restart_to_update() {
             "Automatic update failed. Trying manual update.",
         );
         run_kaku_update_from_menu();
+        release_guard();
         return;
     }
 
