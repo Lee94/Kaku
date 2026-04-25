@@ -163,7 +163,9 @@ pub fn copilot_is_authenticated() -> bool {
 /// RFC 3339 / ISO 8601 timestamp -> Unix seconds. Used for the GitHub Copilot
 /// token expiry. Returns None if the string is malformed or pre-1970.
 fn parse_iso8601_to_unix(s: &str) -> Option<u64> {
-    let ts = chrono::DateTime::parse_from_rfc3339(s.trim()).ok()?.timestamp();
+    let ts = chrono::DateTime::parse_from_rfc3339(s.trim())
+        .ok()?
+        .timestamp();
     if ts < 0 {
         None
     } else {

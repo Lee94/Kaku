@@ -188,10 +188,7 @@ pub(crate) fn run_agent(
             let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
                 Ok(v) => v,
                 Err(e) => {
-                    let err = format!(
-                        "tool '{}' arguments were not valid JSON: {}",
-                        tc.name, e
-                    );
+                    let err = format!("tool '{}' arguments were not valid JSON: {}", tc.name, e);
                     let _ = tx.send(StreamMsg::ToolFailed { error: err.clone() });
                     messages.push(ApiMessage::tool_result(
                         tc.id.clone(),
