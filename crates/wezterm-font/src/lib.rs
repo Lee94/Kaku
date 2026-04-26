@@ -239,7 +239,13 @@ impl LoadedFont {
             presentation_width,
         );
 
-        no_glyphs.retain(|&c| c != '\u{FE0F}' && c != '\u{FE0E}');
+        // Filter out format-only codepoints. They have no standalone glyph and
+        // only carry meaning inside a grapheme cluster. If we let them reach
+        // locate_fallback_for_codepoints, the per-codepoint lookup pulls in a
+        // text-presentation font just to "cover" U+200D / U+200C, which then
+        // pollutes the fallback chain and breaks ZWJ-sequence shaping
+        // (e.g. 👩‍🚒 splits into 👩 + 🚒).
+        no_glyphs.retain(|&c| !matches!(c, '\u{FE0F}' | '\u{FE0E}' | '\u{200D}' | '\u{200C}'));
         filter_out_synthetic(&mut no_glyphs);
 
         let mut tried_glyphs = self.tried_glyphs.borrow_mut();
