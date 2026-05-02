@@ -27,6 +27,7 @@ impl ConfigCommand {
             return Ok(());
         }
 
-        config_tui::run(config_path, config_file, config_override, skip_config).context("config tui")
+        config_tui::run(config_path, config_file, config_override, skip_config)
+            .context("config tui")
     }
 }
