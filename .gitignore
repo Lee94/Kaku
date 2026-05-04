@@ -78,15 +78,14 @@ long_text_*.txt
 
 # Changelog is managed in GitHub Releases only
 CHANGELOG.md
-# AI/agent generated files
-.claude/
-**/.claude/
+# AI/agent local files
+AGENTS.override.md
+**/AGENTS.override.md
+CLAUDE.local.md
+**/CLAUDE.local.md
+.claude/settings.local.json
+**/.claude/settings.local.json
 AGENT.md
-AGENTS.md
-**/AGENTS.md
-CLAUDE.md
-**/CLAUDE.md
-.agents/
 journal/
 **/journal/
 .qoder/
