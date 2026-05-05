@@ -33,3 +33,5 @@
 19	AI Chat Panel: press Cmd+L to chat with AI directly inside the terminal, with streaming and scroll
 19	Shell user-var updates are now cached at startup for faster prompt rendering
 19	MacPorts and non-Homebrew package managers are now detected correctly by kaku init
+19	Cmd+W and Cmd+Shift+W now smart-confirm: bare shells close silently, AI agents and editors prompt before they get killed
+19	Bundled starship.toml shows the current git branch and skips the noisy modification icons; existing users can refresh by removing ~/.config/starship.toml and running kaku init
