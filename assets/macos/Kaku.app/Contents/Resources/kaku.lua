@@ -3753,7 +3753,14 @@ config.text_background_opacity = 1.0
 
 -- ===== Close Protection =====
 config.window_close_confirmation = 'NeverPrompt'
--- Off by default. When enabled, Kaku always asks before closing tabs/panes.
+-- These two booleans are the strict "always ask, even bare zsh" mode.
+-- They stay off by default because Kaku's Cmd+W / Cmd+Shift+W keybinds
+-- already invoke the *smart-skip* path (`confirm = true` is hard-coded
+-- there): a pane closes silently when its process tree is just shells
+-- (bash/zsh/fish/tmux/...), and pops a confirm overlay when anything
+-- stateful is loaded (claude / codex / cursor-agent / vim / cargo / ...).
+-- Set either of these to `true` in your kaku.lua to upgrade to the
+-- always-ask mode.
 config.tab_close_confirmation = false
 config.pane_close_confirmation = false
 
@@ -4071,6 +4078,15 @@ config.keys = (function() return {
 
   -- Close Behavior
   -- Cmd+W: close pane > close tab > hide app
+  --
+  -- We always pass `confirm = true` so the smart-skip logic in Rust
+  -- (`should_confirm`) can run: idle shells (zsh/bash/fish/tmux/...)
+  -- close silently, but anything stateful in the pane process tree —
+  -- AI agents (claude/codex/cursor-agent/gemini), editors (vim/nano),
+  -- builds (cargo/make/npm), long-running scripts — pops a confirm.
+  --
+  -- Setting `pane_close_confirmation = true` / `tab_close_confirmation = true`
+  -- in user config still upgrades to "always ask, even bare zsh".
   {
     key = 'w',
     mods = 'CMD',
@@ -4080,11 +4096,11 @@ config.keys = (function() return {
       local current_tab = pane:tab()
       local panes = current_tab and current_tab:panes() or {}
       if #panes > 1 then
-        win:perform_action(wezterm.action.CloseCurrentPane { confirm = config.pane_close_confirmation }, pane)
+        win:perform_action(wezterm.action.CloseCurrentPane { confirm = true }, pane)
       else
         local should_close_tab = (#tabs > 1) or (#wezterm.mux.all_windows() > 1)
         if should_close_tab then
-          win:perform_action(wezterm.action.CloseCurrentTab { confirm = config.tab_close_confirmation }, pane)
+          win:perform_action(wezterm.action.CloseCurrentTab { confirm = true }, pane)
           return
         end
         win:perform_action(wezterm.action.HideApplication, pane)
@@ -4092,11 +4108,11 @@ config.keys = (function() return {
     end),
   },
 
-  -- Cmd+Shift+W: close current tab
+  -- Cmd+Shift+W: close current tab (same smart-confirm contract as above)
   {
     key = 'w',
     mods = 'CMD|SHIFT',
-    action = wezterm.action.CloseCurrentTab({ confirm = config.tab_close_confirmation }),
+    action = wezterm.action.CloseCurrentTab({ confirm = true }),
   },
 
   -- Tabs & Panes
