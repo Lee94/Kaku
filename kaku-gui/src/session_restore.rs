@@ -222,8 +222,10 @@ fn build_snapshot_for_window(
     }))
 }
 
-fn write_snapshot(snapshot: &SavedWindowSnapshot) -> anyhow::Result<()> {
-    let file_name = snapshot_file();
+fn write_snapshot_to_path(
+    file_name: &std::path::Path,
+    snapshot: &SavedWindowSnapshot,
+) -> anyhow::Result<()> {
     if let Some(parent) = file_name.parent() {
         config::create_user_owned_dirs(parent)
             .with_context(|| format!("create snapshot dir {}", parent.display()))?;
@@ -247,6 +249,10 @@ fn write_snapshot(snapshot: &SavedWindowSnapshot) -> anyhow::Result<()> {
     std::fs::rename(&tmp, &file_name)
         .with_context(|| format!("rename {} -> {}", tmp.display(), file_name.display()))?;
     Ok(())
+}
+
+fn write_snapshot(snapshot: &SavedWindowSnapshot) -> anyhow::Result<()> {
+    write_snapshot_to_path(&snapshot_file(), snapshot)
 }
 
 pub fn save_window_snapshot(window_id: MuxWindowId) -> anyhow::Result<()> {
@@ -305,8 +311,9 @@ pub fn request_save_window_snapshot(window_id: MuxWindowId) {
 ///
 /// `Err` is reserved for unexpected I/O errors that the user should know
 /// about (e.g. permission denied).
-fn load_snapshot() -> anyhow::Result<Option<SavedWindowSnapshot>> {
-    let file_name = snapshot_file();
+fn load_snapshot_from_path(
+    file_name: &std::path::Path,
+) -> anyhow::Result<Option<SavedWindowSnapshot>> {
     let contents = match std::fs::read_to_string(&file_name) {
         Ok(s) => s,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -342,6 +349,10 @@ fn load_snapshot() -> anyhow::Result<Option<SavedWindowSnapshot>> {
     }
 
     Ok(Some(snapshot))
+}
+
+fn load_snapshot() -> anyhow::Result<Option<SavedWindowSnapshot>> {
+    load_snapshot_from_path(&snapshot_file())
 }
 
 async fn spawn_panes_for_tab(
@@ -489,4 +500,57 @@ pub fn restore_previous_window_from_menu() {
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_snapshot(version: u32) -> SavedWindowSnapshot {
+        SavedWindowSnapshot {
+            version,
+            active_tab_idx: 0,
+            window_title: "Test Window".to_string(),
+            tabs: vec![SavedTabSnapshot {
+                title: "Test Tab".to_string(),
+                pane_tree: SavedPaneNode::Empty,
+            }],
+        }
+    }
+
+    #[test]
+    fn snapshot_round_trips_via_atomic_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("last_window_session.json");
+        write_snapshot_to_path(&path, &sample_snapshot(SNAPSHOT_VERSION)).unwrap();
+
+        let loaded = load_snapshot_from_path(&path).unwrap().expect("snapshot");
+        assert_eq!(loaded.version, SNAPSHOT_VERSION);
+        assert_eq!(loaded.active_tab_idx, 0);
+        assert_eq!(loaded.window_title, "Test Window");
+        assert_eq!(loaded.tabs.len(), 1);
+        assert_eq!(loaded.tabs[0].title, "Test Tab");
+    }
+
+    #[test]
+    fn corrupt_snapshot_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("last_window_session.json");
+        std::fs::write(&path, "{not json").unwrap();
+
+        assert!(load_snapshot_from_path(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn unsupported_snapshot_version_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("last_window_session.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&sample_snapshot(SNAPSHOT_VERSION + 1)).unwrap(),
+        )
+        .unwrap();
+
+        assert!(load_snapshot_from_path(&path).unwrap().is_none());
+    }
 }

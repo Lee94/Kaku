@@ -320,7 +320,7 @@ impl crate::TermWindow {
                 _ => 0.,
             })
             .sum();
-        let max_tab_width = ((self.dimensions.pixel_width as f32 / num_tabs)
+        let max_tab_width = ((self.dimensions.pixel_width as f32 / num_tabs.max(1.0))
             - (1.5 * metrics.cell_size.width as f32))
             .max(0.);
 
