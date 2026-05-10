@@ -144,10 +144,10 @@ fn palette_matches_builtin(
 
 fn dark_palette() -> ThemePalette {
     ThemePalette {
-        primary: rgb("#A277FF"),
-        secondary: rgb("#61FFCA"),
-        accent: rgb("#FFCA85"),
-        error: rgb("#FF6767"),
+        primary: rgb("#8464C6"),
+        secondary: rgb("#54C59F"),
+        accent: rgb("#C7A06F"),
+        error: rgb("#C55858"),
         text: rgb("#EDECEE"),
         muted: rgb("#6D6D6D"),
         bg: rgb("#15141B"),
@@ -530,7 +530,7 @@ config.color_scheme = some_runtime_value
     fn pick_visible_keeps_accessible_candidate() {
         let bg = rgb("#15141B");
         let text = rgb("#EDECEE");
-        let candidate = rgb("#A277FF");
+        let candidate = rgb("#8464C6");
 
         assert_eq!(pick_visible(bg, text, &[candidate]), candidate);
     }

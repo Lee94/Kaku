@@ -14,7 +14,7 @@
 4. **AI Configuration**: Assistant settings now use Simple and Deep models, with live model loading, proxy-aware requests, OAuth setup, and broader provider responses.
 5. **AI Safety and Context**: Stricter shell approvals, sensitive-path guards covering search and project tools, tighter file write and patch limits, failed-command context, and clearer parse errors.
 6. **Window Snapshots**: Kaku auto-saves multi-tab and multi-pane layouts. Restore with `Cmd+Option+Shift+T`, Shell → Restore Previous Window, or the Command Palette.
-7. **macOS and Terminal UX**: AppleScript dictionary for automation, animated tab drag-and-swap. Fixed fullscreen crashes, display races, resize gaps, cursor reflow, links, selection, light-theme readability, and TUI copy.
+7. **macOS and Terminal UX**: AppleScript dictionary for automation, animated tab drag-and-swap, softer dark-theme highlight palette. Fixed fullscreen crashes, display races, resize gaps, cursor reflow, links, selection, light-theme readability, and TUI copy.
 8. **Updates, Shell, and Performance**: Background downloads with fail-closed checksums, better proxy and MacPorts detection, cached shell state, faster cold start via Lua bytecode caching and deferred initialization.
 
 ### 更新日志
@@ -25,7 +25,7 @@
 4. **AI 配置**：Assistant 设置改为 Simple Model 和 Deep Model，支持在线模型加载、代理感知请求、OAuth 配置，以及更多 provider 响应格式。
 5. **AI 安全与上下文**：shell 审批、敏感路径保护扩展到搜索类工具、文件写入与 patch 上限收紧、失败命令上下文和解析错误都更稳。
 6. **窗口快照**：Kaku 自动保存多 tab、多 pane 布局，需要时按 `Cmd+Option+Shift+T`，或从 Shell → Restore Previous Window、命令面板恢复。
-7. **macOS 与终端体验**：新增 AppleScript 字典支持自动化，拖拽标签页动画排序。修复全屏崩溃和卡住、显示器竞态、resize 缝隙、光标 reflow、链接、选择、浅色主题可读性和 TUI 复制。
+7. **macOS 与终端体验**：新增 AppleScript 字典支持自动化，拖拽标签页动画排序，深色主题高亮色更柔和。修复全屏崩溃和卡住、显示器竞态、resize 缝隙、光标 reflow、链接、选择、浅色主题可读性和 TUI 复制。
 8. **更新、Shell 与性能**：更新改为后台下载，checksum 失败时关闭风险路径，代理与 MacPorts 检测更稳，shell 状态缓存，冷启动优化（Lua 字节码缓存、延迟初始化）。
 
 Special thanks to @s010s, @SherlockSalvatore, @darion-yaphet, @ddotz, @beautifulrem, @yxspace, and @fanweixiao for their contributions to this release.
