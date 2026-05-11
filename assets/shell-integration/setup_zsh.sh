@@ -262,6 +262,10 @@ EOF
 		!skip { print }
 	' "$YAZI_THEME_FILE" >"$tmp_theme"
 
+	# Drop trailing blank lines so the managed block doesn't drift down each run.
+	awk 'NF { for (i = 0; i < blank; i++) print ""; blank = 0; print; next } { blank++ }' \
+		"$tmp_theme" >"${tmp_theme}.trim" && mv "${tmp_theme}.trim" "$tmp_theme"
+
 	{
 		cat "$tmp_theme"
 		printf '\n'
@@ -391,6 +395,10 @@ BLOCK
 		index($0, end)   { skip = 0; next }
 		!skip { print }
 	' "$YAZI_THEME_FILE" >"$tmp_theme"
+
+	# Drop trailing blank lines so the managed block doesn't drift down each run.
+	awk 'NF { for (i = 0; i < blank; i++) print ""; blank = 0; print; next } { blank++ }' \
+		"$tmp_theme" >"${tmp_theme}.trim" && mv "${tmp_theme}.trim" "$tmp_theme"
 
 	{
 		cat "$tmp_theme"
