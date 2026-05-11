@@ -4126,6 +4126,11 @@ impl TermWindow {
                     w.toggle_fullscreen();
                 }
             }
+            MaximizeWindow => {
+                if let Some(w) = self.window.as_ref() {
+                    w.maximize();
+                }
+            }
             ToggleAlwaysOnTop => {
                 let window = match self.window.clone() {
                     Some(w) => w,

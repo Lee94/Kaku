@@ -236,6 +236,7 @@ impl CommandDef {
             ScrollToBottom,
             // Window menu
             ToggleFullScreen,
+            MaximizeWindow,
             Hide,
             ToggleAlwaysOnTop,
             ToggleAlwaysOnBottom,
@@ -762,7 +763,8 @@ impl CommandDef {
                 "Window" => match action {
                     Hide => 10,
                     ToggleFullScreen => 12,
-                    ToggleAlwaysOnTop => 13,
+                    MaximizeWindow => 13,
+                    ToggleAlwaysOnTop => 14,
                     ActivateWindowRelative(-1) => 20,
                     ActivateWindowRelative(1) => 21,
                     ActivateWindow(_) => 22,
@@ -1165,6 +1167,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             brief: "Toggle Full Screen".into(),
             doc: "Toggle full screen mode".into(),
             keys: vec![(Modifiers::CTRL.union(Modifiers::SUPER), "f".into())],
+            args: &[ArgType::ActiveWindow],
+            menubar: &["Window"],
+            icon: None,
+        },
+        MaximizeWindow => CommandDef {
+            brief: "Fill".into(),
+            doc: "Zoom the window to fill the active display (AppKit zoom)".into(),
+            keys: vec![],
             args: &[ArgType::ActiveWindow],
             menubar: &["Window"],
             icon: None,
@@ -2646,6 +2656,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         ScrollToBottom,
         // ----------------- Window
         ToggleFullScreen,
+        MaximizeWindow,
         Hide,
         ToggleAlwaysOnTop,
         Search(Pattern::CurrentSelectionOrEmptyString),
