@@ -32,6 +32,10 @@ pub struct PersistedAttachment {
 pub struct PersistedMessage {
     pub role: String,
     pub content: String,
+    /// Provider reasoning returned in a structured hidden field, e.g.
+    /// DeepSeek-compatible `reasoning_content`. Kept out of visible content.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning_content: String,
     #[serde(default)]
     pub attachments: Vec<PersistedAttachment>,
     /// Sequential index of the user/assistant exchange pair this message belongs to.
@@ -132,7 +136,11 @@ fn load_conversation_from(dir: &Path, id: &str) -> Result<Vec<PersistedMessage>>
     let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let file: ConversationFile =
         serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
-    Ok(file.messages)
+    Ok(file
+        .messages
+        .into_iter()
+        .map(migrate_visible_reasoning_blocks)
+        .collect())
 }
 
 fn write_conversation_to(
@@ -396,6 +404,48 @@ fn write_atomic(path: &PathBuf, content: &str) -> Result<()> {
     Ok(())
 }
 
+fn migrate_visible_reasoning_blocks(mut msg: PersistedMessage) -> PersistedMessage {
+    if msg.role == "assistant" {
+        let (content, reasoning) = split_visible_reasoning_blocks(&msg.content);
+        if !reasoning.is_empty() {
+            msg.content = content;
+            if msg.reasoning_content.is_empty() {
+                msg.reasoning_content = reasoning;
+            }
+        }
+    }
+    msg
+}
+
+fn split_visible_reasoning_blocks(content: &str) -> (String, String) {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+
+    let mut visible = String::new();
+    let mut reasoning = String::new();
+    let mut rest = content;
+
+    while let Some(start) = rest.find(OPEN) {
+        visible.push_str(&rest[..start]);
+        let after_open = &rest[start + OPEN.len()..];
+        let Some(end) = after_open.find(CLOSE) else {
+            visible.push_str(&rest[start..]);
+            return (visible, reasoning);
+        };
+        let block = after_open[..end].trim_matches('\n');
+        if !block.trim().is_empty() {
+            if !reasoning.is_empty() {
+                reasoning.push('\n');
+            }
+            reasoning.push_str(block);
+        }
+        rest = &after_open[end + CLOSE.len()..];
+    }
+
+    visible.push_str(rest);
+    (visible.trim_start_matches('\n').to_string(), reasoning)
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -516,7 +566,44 @@ mod tests {
         let msg: PersistedMessage = serde_json::from_str(raw).unwrap();
         assert_eq!(msg.role, "user");
         assert_eq!(msg.content, "hello");
+        assert!(msg.reasoning_content.is_empty());
         assert!(msg.attachments.is_empty());
+    }
+
+    #[test]
+    fn split_visible_reasoning_blocks_removes_legacy_think_tags() {
+        let input = "<think>\nfirst\n</think>\n\n<think>\nsecond\n</think>\n\nVisible answer.";
+        let (content, reasoning) = split_visible_reasoning_blocks(input);
+        assert_eq!(content, "Visible answer.");
+        assert_eq!(reasoning, "first\nsecond");
+    }
+
+    #[test]
+    fn migrate_visible_reasoning_blocks_keeps_user_messages_unchanged() {
+        let msg = PersistedMessage {
+            role: "user".to_string(),
+            content: "<think>\nkeep\n</think>\n\nliteral".to_string(),
+            reasoning_content: String::new(),
+            attachments: vec![],
+            round_id: 0,
+        };
+        let migrated = migrate_visible_reasoning_blocks(msg);
+        assert!(migrated.reasoning_content.is_empty());
+        assert!(migrated.content.contains("<think>"));
+    }
+
+    #[test]
+    fn migrate_visible_reasoning_blocks_strips_legacy_tags_when_reasoning_already_exists() {
+        let msg = PersistedMessage {
+            role: "assistant".to_string(),
+            content: "<think>\nduplicate\n</think>\n\nVisible".to_string(),
+            reasoning_content: "hidden".to_string(),
+            attachments: vec![],
+            round_id: 0,
+        };
+        let migrated = migrate_visible_reasoning_blocks(msg);
+        assert_eq!(migrated.content, "Visible");
+        assert_eq!(migrated.reasoning_content, "hidden");
     }
 
     #[test]
@@ -527,6 +614,7 @@ mod tests {
             messages: vec![PersistedMessage {
                 role: "user".to_string(),
                 content: "question".to_string(),
+                reasoning_content: String::new(),
                 attachments: vec![PersistedAttachment {
                     kind: "cwd".to_string(),
                     label: "@cwd".to_string(),

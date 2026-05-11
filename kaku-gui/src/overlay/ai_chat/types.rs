@@ -138,6 +138,7 @@ impl MessageAttachment {
 pub(crate) struct Message {
     pub(crate) role: Role,
     pub(crate) content: String,
+    pub(crate) reasoning_content: String,
     /// False while the assistant is still streaming.
     pub(crate) complete: bool,
     /// True for UI-only messages (e.g. welcome text) that are not sent to the API.
@@ -161,6 +162,7 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            reasoning_content: String::new(),
             complete,
             is_context,
             tool_name: None,
@@ -176,6 +178,7 @@ impl Message {
         Self {
             role: Role::User,
             content: content.into(),
+            reasoning_content: String::new(),
             complete: true,
             is_context: false,
             tool_name: None,
@@ -188,6 +191,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: String::new(),
+            reasoning_content: String::new(),
             complete: false,
             is_context: false,
             tool_name: Some(name.into()),
@@ -364,6 +368,12 @@ pub(crate) enum DisplayLine {
     /// message will appear. The renderer substitutes the current spinner
     /// frame at draw time so the dot pulses without rebuilding the cache.
     LoadingDot,
+    /// Collapsible reasoning header. Shows character count when collapsed,
+    /// reasoning content follows as Quote-styled lines when expanded.
+    ThinkingHeader {
+        char_count: usize,
+        expanded: bool,
+    },
     Blank,
 }
 

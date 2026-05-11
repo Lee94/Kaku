@@ -244,6 +244,14 @@ fn build_line_runs(
                 format!("  {}  Thinking...", spinner_char),
             ));
         }
+        DisplayLine::ThinkingHeader {
+            char_count,
+            expanded,
+        } => {
+            let arrow = if *expanded { "▼" } else { "▶" };
+            let label = format!("  {} Thinking ({} chars) · ^O toggle", arrow, char_count);
+            runs.push((pal.input_cell(), label));
+        }
         DisplayLine::Blank => {}
     }
     runs
@@ -681,11 +689,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
                 x: Position::Absolute(cx),
                 y: Position::Absolute(cy),
             });
-            // BlinkingBar makes the input caret unmistakable on both dark and
-            // light themes; without it the overlay inherits whatever default
-            // the embedded terminal uses, which can be steady and hard to spot
-            // (especially after clicking into the input box).
-            changes.push(Change::CursorShape(CursorShape::BlinkingBar));
+            changes.push(Change::CursorShape(CursorShape::SteadyBlock));
             changes.push(Change::CursorVisibility(CursorVisibility::Visible));
         }
         None => {

@@ -278,6 +278,17 @@ impl ApiMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self(serde_json::json!({ "role": "assistant", "content": content.into() }))
     }
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning_content: impl AsRef<str>,
+    ) -> Self {
+        let mut msg = serde_json::json!({ "role": "assistant", "content": content.into() });
+        let reasoning = reasoning_content.as_ref();
+        if !reasoning.is_empty() {
+            msg["reasoning_content"] = serde_json::Value::String(reasoning.to_string());
+        }
+        Self(msg)
+    }
     /// Assistant turn that requested tool calls (content is null per the OpenAI spec).
     pub fn assistant_tool_calls(tool_calls: serde_json::Value) -> Self {
         Self(serde_json::json!({
@@ -307,6 +318,11 @@ impl ApiMessage {
     pub fn byte_len(&self) -> usize {
         serde_json::to_vec(&self.0).map(|v| v.len()).unwrap_or(0)
     }
+}
+
+pub fn should_roundtrip_reasoning_content(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("deepseek") || model.contains("kimi") || model.contains("mimo")
 }
 
 // ─── Tool calling ─────────────────────────────────────────────────────────────
@@ -392,9 +408,16 @@ impl AiClient {
     pub fn complete_once(&self, model: &str, messages: &[ApiMessage]) -> Result<String> {
         let cancelled = AtomicBool::new(false);
         let mut text = String::new();
-        self.chat_step(model, messages, &[], &cancelled, &mut |tok| {
-            text.push_str(tok);
-        })?;
+        self.chat_step(
+            model,
+            messages,
+            &[],
+            &cancelled,
+            &mut |tok| {
+                text.push_str(tok);
+            },
+            &mut |_| {},
+        )?;
         Ok(text.trim().to_string())
     }
 
@@ -484,6 +507,7 @@ impl AiClient {
         tools: &[serde_json::Value],
         cancelled: &AtomicBool,
         on_token: &mut dyn FnMut(&str),
+        on_reasoning: &mut dyn FnMut(&str),
     ) -> Result<Vec<ToolCall>> {
         let url = format!("{}/chat/completions", self.config.base_url);
 
@@ -513,6 +537,7 @@ impl AiClient {
         // BTreeMap keeps indices sorted so we process them in order.
         let mut tc_buf: BTreeMap<usize, ToolCallBuf> = BTreeMap::new();
         let mut finish_reason = String::new();
+        let mut think_filter = InlineThinkFilter::new();
 
         for line in reader.lines() {
             if cancelled.load(Ordering::Relaxed) {
@@ -546,17 +571,21 @@ impl AiClient {
 
             let delta = &choice["delta"];
 
-            // Text delta (standard) and reasoning delta (DeepSeek et al.).
-            if let Some(reasoning) = delta["reasoning_content"]
-                .as_str()
-                .or_else(|| choice["reasoning"].as_str())
-            {
+            // Reasoning delta (DeepSeek et al. via dedicated field).
+            if let Some(reasoning) = reasoning_delta_text(choice, delta) {
                 if !reasoning.is_empty() {
-                    on_token(&format!("<think>\n{}\n</think>\n\n", reasoning));
+                    on_reasoning(reasoning);
                 }
             }
+            // Text delta: filter inline <think> tags (Zhipu glm-5-turbo et al.
+            // embed reasoning inside content rather than a dedicated field).
             if let Some(content) = delta["content"].as_str() {
-                on_token(content);
+                for seg in think_filter.feed(content) {
+                    match seg {
+                        ThinkSegment::Token(t) => on_token(&t),
+                        ThinkSegment::Reasoning(r) => on_reasoning(&r),
+                    }
+                }
             }
 
             // Tool call deltas: accumulate arguments by index.
@@ -576,6 +605,13 @@ impl AiClient {
                         }
                     }
                 }
+            }
+        }
+
+        for seg in think_filter.flush() {
+            match seg {
+                ThinkSegment::Token(t) => on_token(&t),
+                ThinkSegment::Reasoning(r) => on_reasoning(&r),
             }
         }
 
@@ -672,6 +708,105 @@ struct ToolCallBuf {
     arguments: String,
 }
 
+fn reasoning_delta_text<'a>(
+    choice: &'a serde_json::Value,
+    delta: &'a serde_json::Value,
+) -> Option<&'a str> {
+    delta["reasoning_content"]
+        .as_str()
+        .or_else(|| delta["reasoning"].as_str())
+        .or_else(|| delta["reasoning"]["content"].as_str())
+        .or_else(|| delta["thinking"].as_str())
+        .or_else(|| delta["thinking"]["content"].as_str())
+        .or_else(|| choice["reasoning"].as_str())
+}
+
+// ─── Inline <think> tag filter ───────────────────────────────────────────────
+
+enum ThinkSegment {
+    Token(String),
+    Reasoning(String),
+}
+
+struct InlineThinkFilter {
+    inside_think: bool,
+    pending: String,
+}
+
+impl InlineThinkFilter {
+    fn new() -> Self {
+        Self {
+            inside_think: false,
+            pending: String::new(),
+        }
+    }
+
+    fn feed(&mut self, chunk: &str) -> Vec<ThinkSegment> {
+        self.pending.push_str(chunk);
+        let mut out = Vec::new();
+        loop {
+            if self.inside_think {
+                if let Some(pos) = self.pending.find("</think>") {
+                    let reasoning = &self.pending[..pos];
+                    if !reasoning.is_empty() {
+                        out.push(ThinkSegment::Reasoning(reasoning.to_string()));
+                    }
+                    self.pending = self.pending[pos + "</think>".len()..].to_string();
+                    self.inside_think = false;
+                } else {
+                    let safe = self.safe_emit_len("</think>");
+                    if safe > 0 {
+                        out.push(ThinkSegment::Reasoning(self.pending[..safe].to_string()));
+                        self.pending = self.pending[safe..].to_string();
+                    }
+                    break;
+                }
+            } else if let Some(pos) = self.pending.find("<think>") {
+                let text = &self.pending[..pos];
+                if !text.is_empty() {
+                    out.push(ThinkSegment::Token(text.to_string()));
+                }
+                self.pending = self.pending[pos + "<think>".len()..].to_string();
+                self.inside_think = true;
+            } else {
+                let safe = self.safe_emit_len("<think>");
+                if safe > 0 {
+                    out.push(ThinkSegment::Token(self.pending[..safe].to_string()));
+                    self.pending = self.pending[safe..].to_string();
+                }
+                break;
+            }
+        }
+        out
+    }
+
+    fn flush(&mut self) -> Vec<ThinkSegment> {
+        let mut out = Vec::new();
+        if !self.pending.is_empty() {
+            let text = std::mem::take(&mut self.pending);
+            if self.inside_think {
+                out.push(ThinkSegment::Reasoning(text));
+            } else {
+                out.push(ThinkSegment::Token(text));
+            }
+        }
+        out
+    }
+
+    fn safe_emit_len(&self, tag: &str) -> usize {
+        let len = self.pending.len();
+        for i in 1..=tag.len().min(len) {
+            if tag
+                .as_bytes()
+                .starts_with(&self.pending.as_bytes()[len - i..])
+            {
+                return len - i;
+            }
+        }
+        len
+    }
+}
+
 /// Maps (base_url, auth_type) to a display provider name.
 ///
 /// Single source of truth for provider naming. The `kaku` binary used to
@@ -690,7 +825,10 @@ fn detect_provider_with_auth(base_url: &str, auth_type: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_provider_with_auth, parse_custom_headers};
+    use super::{
+        detect_provider_with_auth, parse_custom_headers, reasoning_delta_text,
+        should_roundtrip_reasoning_content, ApiMessage, InlineThinkFilter, ThinkSegment,
+    };
 
     #[test]
     fn detects_copilot_and_codex_and_falls_back_to_custom() {
@@ -730,6 +868,59 @@ mod tests {
     }
 
     #[test]
+    fn assistant_with_reasoning_keeps_reasoning_hidden_field() {
+        let msg = ApiMessage::assistant_with_reasoning("visible", "hidden thought");
+        assert_eq!(msg.0["role"], "assistant");
+        assert_eq!(msg.0["content"], "visible");
+        assert_eq!(msg.0["reasoning_content"], "hidden thought");
+
+        let without = ApiMessage::assistant_with_reasoning("visible", "");
+        assert!(without.0.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn reasoning_delta_text_accepts_common_openai_compatible_shapes() {
+        let cases = [
+            (
+                serde_json::json!({"delta": {"reasoning_content": "a"}}),
+                "a",
+            ),
+            (serde_json::json!({"delta": {"reasoning": "b"}}), "b"),
+            (
+                serde_json::json!({"delta": {"reasoning": {"content": "c"}}}),
+                "c",
+            ),
+            (serde_json::json!({"delta": {"thinking": "d"}}), "d"),
+            (
+                serde_json::json!({"delta": {"thinking": {"content": "e"}}}),
+                "e",
+            ),
+            (serde_json::json!({"delta": {}, "reasoning": "f"}), "f"),
+        ];
+
+        for (choice, expected) in cases {
+            assert_eq!(
+                reasoning_delta_text(&choice, &choice["delta"]),
+                Some(expected)
+            );
+        }
+
+        let choice = serde_json::json!({"delta": {"content": "visible"}});
+        assert_eq!(reasoning_delta_text(&choice, &choice["delta"]), None);
+    }
+
+    #[test]
+    fn reasoning_roundtrip_is_limited_to_reasoning_models() {
+        assert!(should_roundtrip_reasoning_content("deepseek-v4-pro"));
+        assert!(should_roundtrip_reasoning_content("Kimi-K2.5"));
+        assert!(should_roundtrip_reasoning_content("mimo-thinking"));
+        assert!(!should_roundtrip_reasoning_content("gpt-5.4"));
+        assert!(!should_roundtrip_reasoning_content(
+            "gemini-3-flash-preview"
+        ));
+    }
+
+    #[test]
     fn parses_custom_headers_from_array_and_rejects_bad_entries() {
         let value = toml::Value::Array(vec![
             toml::Value::String("X-Customer-ID: acme".to_string()),
@@ -750,5 +941,74 @@ mod tests {
         let reserved =
             toml::Value::Array(vec![toml::Value::String("Authorization: nope".to_string())]);
         assert!(parse_custom_headers(Some(&reserved)).is_err());
+    }
+
+    #[test]
+    fn think_filter_single_block() {
+        let mut f = InlineThinkFilter::new();
+        let segs = f.feed("<think>reasoning</think>visible");
+        let mut tokens = Vec::new();
+        let mut reasoning = Vec::new();
+        for s in segs {
+            match s {
+                ThinkSegment::Token(t) => tokens.push(t),
+                ThinkSegment::Reasoning(r) => reasoning.push(r),
+            }
+        }
+        assert_eq!(reasoning.join(""), "reasoning");
+        assert_eq!(tokens.join(""), "visible");
+    }
+
+    #[test]
+    fn think_filter_split_across_chunks() {
+        let mut f = InlineThinkFilter::new();
+        let mut tokens = Vec::new();
+        let mut reasoning = Vec::new();
+        let collect =
+            |segs: Vec<ThinkSegment>, tokens: &mut Vec<String>, reasoning: &mut Vec<String>| {
+                for s in segs {
+                    match s {
+                        ThinkSegment::Token(t) => tokens.push(t),
+                        ThinkSegment::Reasoning(r) => reasoning.push(r),
+                    }
+                }
+            };
+        collect(f.feed("<thi"), &mut tokens, &mut reasoning);
+        collect(f.feed("nk>deep thought</thi"), &mut tokens, &mut reasoning);
+        collect(f.feed("nk>hello"), &mut tokens, &mut reasoning);
+        collect(f.flush(), &mut tokens, &mut reasoning);
+        assert_eq!(reasoning.join(""), "deep thought");
+        assert_eq!(tokens.join(""), "hello");
+    }
+
+    #[test]
+    fn think_filter_no_tags() {
+        let mut f = InlineThinkFilter::new();
+        let segs = f.feed("plain text");
+        assert!(segs.iter().all(|s| matches!(s, ThinkSegment::Token(_))));
+        let text: String = segs
+            .into_iter()
+            .map(|s| match s {
+                ThinkSegment::Token(t) => t,
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(text, "plain text");
+    }
+
+    #[test]
+    fn think_filter_repeated_tags() {
+        let mut f = InlineThinkFilter::new();
+        let segs = f.feed("<think>a</think>x<think>b</think>y");
+        let mut tokens = String::new();
+        let mut reasoning = String::new();
+        for s in segs {
+            match s {
+                ThinkSegment::Token(t) => tokens.push_str(&t),
+                ThinkSegment::Reasoning(r) => reasoning.push_str(&r),
+            }
+        }
+        assert_eq!(reasoning, "ab");
+        assert_eq!(tokens, "xy");
     }
 }

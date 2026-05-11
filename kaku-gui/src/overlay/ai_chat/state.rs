@@ -10,7 +10,7 @@ use termwiz::cell::unicode_column_width;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::ai_chat_engine::{StreamMsg, MAX_HISTORY_PAIRS};
-use crate::ai_client::{AiClient, ApiMessage};
+use crate::ai_client::{should_roundtrip_reasoning_content, AiClient, ApiMessage};
 use crate::ai_conversations;
 
 use super::layout::{char_to_byte_pos, layout_input};
@@ -352,6 +352,30 @@ pub(super) fn format_user_message(content: &str, attachments: &[MessageAttachmen
 
 /// Emit wrapped User content as plain `DisplayLine::Text` entries. No markdown
 /// parsing for user input: the user typed it, we show it literally.
+fn emit_reasoning_lines(out: &mut Vec<DisplayLine>, content: &str, width: usize) {
+    let quote_w = width.saturating_sub(4);
+    for raw in content.split('\n') {
+        let seg = vec![InlineSpan {
+            text: raw.to_string(),
+            style: InlineStyle::Plain,
+        }];
+        for wrapped in wrap_segments(&seg, quote_w) {
+            out.push(DisplayLine::Text {
+                segments: if wrapped.is_empty() {
+                    vec![InlineSpan {
+                        text: String::new(),
+                        style: InlineStyle::Plain,
+                    }]
+                } else {
+                    wrapped
+                },
+                role: Role::Assistant,
+                block: BlockStyle::Quote,
+            });
+        }
+    }
+}
+
 fn emit_user_lines(out: &mut Vec<DisplayLine>, content: &str, width: usize) {
     for raw in content.split('\n') {
         let seg = vec![InlineSpan {
@@ -618,6 +642,9 @@ pub(crate) struct App {
     /// When true, the next AssistantStart message is marked as is_context so
     /// it is excluded from persistence and future API context.
     pub(crate) next_assistant_is_context: bool,
+    /// When true, reasoning_content blocks are expanded in the display.
+    /// Toggled by Ctrl+O (matching Claude Code's shortcut).
+    pub(crate) show_thinking: bool,
 }
 
 impl App {
@@ -714,7 +741,9 @@ impl App {
                             .collect(),
                     )
                 } else {
-                    Message::text(Role::Assistant, p.content, true, false)
+                    let mut msg = Message::text(Role::Assistant, p.content, true, false);
+                    msg.reasoning_content = p.reasoning_content;
+                    msg
                 }
             })
             .collect();
@@ -778,6 +807,7 @@ impl App {
             input_undo_stack: Vec::new(),
             stream_is_transient: false,
             next_assistant_is_context: false,
+            show_thinking: false,
         }
     }
 
@@ -1095,10 +1125,21 @@ impl App {
                 },
             });
 
+            if msg.role == Role::Assistant && !msg.reasoning_content.is_empty() {
+                let char_count = msg.reasoning_content.chars().count();
+                lines.push(DisplayLine::ThinkingHeader {
+                    char_count,
+                    expanded: self.show_thinking,
+                });
+                if self.show_thinking {
+                    emit_reasoning_lines(&mut lines, &msg.reasoning_content, w);
+                }
+            }
+
             if msg.role == Role::Assistant && msg.content.is_empty() && !msg.complete {
-                // Waiting for first token: show pulsing dot instead of ▋ placeholder.
-                // No trailing Blank so the dot sits flush below the AI header.
-                lines.push(DisplayLine::LoadingDot);
+                if msg.reasoning_content.is_empty() {
+                    lines.push(DisplayLine::LoadingDot);
+                }
             } else {
                 match msg.role {
                     Role::User => emit_user_lines(&mut lines, &msg.content, w),
@@ -1361,7 +1402,14 @@ impl App {
                     &msg.attachments,
                 ))),
                 Role::Assistant if msg.complete => {
-                    out.push(ApiMessage::assistant(msg.content.clone()))
+                    if should_roundtrip_reasoning_content(&self.current_model()) {
+                        out.push(ApiMessage::assistant_with_reasoning(
+                            msg.content.clone(),
+                            &msg.reasoning_content,
+                        ));
+                    } else {
+                        out.push(ApiMessage::assistant(msg.content.clone()));
+                    }
                 }
                 _ => {}
             }
@@ -1391,6 +1439,16 @@ impl App {
                     Ok(StreamMsg::Token(t)) => {
                         for g in t.graphemes(true) {
                             self.grapheme_queue.push_back(g.to_string());
+                        }
+                    }
+                    Ok(StreamMsg::Reasoning(t)) => {
+                        if let Some(last) = self
+                            .messages
+                            .iter_mut()
+                            .rev()
+                            .find(|m| !m.is_tool() && !m.complete)
+                        {
+                            last.reasoning_content.push_str(&t);
                         }
                     }
                     Ok(StreamMsg::ToolStart { name, args_preview }) => {
@@ -1514,13 +1572,21 @@ impl App {
                     last.content = format!("[error: {}]", e);
                     last.complete = true;
                 }
-            } else if let Some(last) = self
-                .messages
-                .iter_mut()
-                .rev()
-                .find(|m| !m.is_tool() && !m.complete)
-            {
-                last.complete = true;
+            } else {
+                for msg in self
+                    .messages
+                    .iter_mut()
+                    .filter(|m| !m.is_tool() && !m.complete)
+                {
+                    msg.complete = true;
+                }
+                self.messages.retain(|m| {
+                    !(m.role == Role::Assistant
+                        && !m.is_context
+                        && !m.is_tool()
+                        && m.complete
+                        && m.content.is_empty())
+                });
             }
             self.stream_pending_done = false;
             self.is_streaming = false;
@@ -1607,6 +1673,7 @@ impl App {
                 ai_conversations::PersistedMessage {
                     role: role_str.to_string(),
                     content: m.content.clone(),
+                    reasoning_content: m.reasoning_content.clone(),
                     attachments: m
                         .attachments
                         .iter()
@@ -1939,7 +2006,9 @@ impl App {
                                     .collect(),
                             )
                         } else {
-                            Message::text(Role::Assistant, p.content, true, false)
+                            let mut msg = Message::text(Role::Assistant, p.content, true, false);
+                            msg.reasoning_content = p.reasoning_content;
+                            msg
                         }
                     })
                     .collect();

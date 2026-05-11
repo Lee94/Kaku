@@ -90,12 +90,19 @@ fn run_chat(client: AiClient, req: AiRequest) {
     let tx_tokens = tx.clone();
     let conv_tokens = conversation_id.clone();
 
-    let result = client.chat_step(&model, &messages, &[], &cancel, &mut move |tok: &str| {
-        let _ = tx_tokens.send(AiEvent::AiToken {
-            conversation_id: conv_tokens.clone(),
-            delta: tok.to_string(),
-        });
-    });
+    let result = client.chat_step(
+        &model,
+        &messages,
+        &[],
+        &cancel,
+        &mut move |tok: &str| {
+            let _ = tx_tokens.send(AiEvent::AiToken {
+                conversation_id: conv_tokens.clone(),
+                delta: tok.to_string(),
+            });
+        },
+        &mut |_| {},
+    );
 
     match result {
         Ok(_) => {

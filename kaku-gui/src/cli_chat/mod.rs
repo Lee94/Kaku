@@ -99,6 +99,7 @@ pub fn run(args: CliArgs) -> anyhow::Result<()> {
 fn run_one_shot(engine: &mut Engine, prompt: String) -> anyhow::Result<()> {
     let rx = engine.submit(prompt);
     let mut assistant_buf = String::new();
+    let mut reasoning_buf = String::new();
     let stdout = std::io::stdout();
 
     for msg in rx {
@@ -109,6 +110,9 @@ fn run_one_shot(engine: &mut Engine, prompt: String) -> anyhow::Result<()> {
                 let mut out = stdout.lock();
                 let _ = out.write_all(t.as_bytes());
                 let _ = out.flush();
+            }
+            StreamMsg::Reasoning(t) => {
+                reasoning_buf.push_str(&t);
             }
             StreamMsg::ToolStart { name, args_preview } => {
                 eprintln!("  -> {} {}", name, args_preview);
@@ -141,7 +145,7 @@ fn run_one_shot(engine: &mut Engine, prompt: String) -> anyhow::Result<()> {
     }
 
     if !assistant_buf.is_empty() {
-        engine.record_assistant(assistant_buf);
+        engine.record_assistant_with_reasoning(assistant_buf, reasoning_buf);
         engine.spawn_post_round_tasks();
     }
 
@@ -211,6 +215,7 @@ struct Tui {
     stream_rx: Option<Receiver<StreamMsg>>,
     /// Pending assistant buffer for record_assistant after Done.
     pending_assistant: String,
+    pending_reasoning: String,
     /// Pending approval request waiting for user y/N.
     pending_approval: Option<(String, SyncSender<bool>)>,
     scroll_offset: usize,
@@ -231,6 +236,7 @@ impl Tui {
             is_streaming: false,
             stream_rx: None,
             pending_assistant: String::new(),
+            pending_reasoning: String::new(),
             pending_approval: None,
             scroll_offset: 0,
             cols,
@@ -323,6 +329,9 @@ impl Tui {
                     self.streaming_buf.push_str(&t);
                     self.pending_assistant.push_str(&t);
                     changed = true;
+                }
+                Ok(StreamMsg::Reasoning(t)) => {
+                    self.pending_reasoning.push_str(&t);
                 }
                 Ok(StreamMsg::AssistantStart) => {}
                 Ok(StreamMsg::ToolStart { name, args_preview }) => {
@@ -509,7 +518,8 @@ fn run_repl(engine: &mut Engine) -> anyhow::Result<()> {
             // After streaming done, record assistant response.
             if !tui.is_streaming && !tui.pending_assistant.is_empty() {
                 let buf = std::mem::take(&mut tui.pending_assistant);
-                engine.record_assistant(buf);
+                let reasoning = std::mem::take(&mut tui.pending_reasoning);
+                engine.record_assistant_with_reasoning(buf, reasoning);
                 engine.spawn_post_round_tasks();
             }
         }
@@ -671,6 +681,7 @@ fn run_repl(engine: &mut Engine) -> anyhow::Result<()> {
                 tui.is_streaming = true;
                 tui.streaming_buf.clear();
                 tui.pending_assistant.clear();
+                tui.pending_reasoning.clear();
                 tui.stream_rx = Some(engine.submit(trimmed));
                 tui.scroll_to_bottom();
                 needs_redraw = true;

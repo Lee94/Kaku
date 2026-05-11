@@ -6,7 +6,7 @@
 pub(crate) mod approval;
 pub(crate) mod compact;
 
-use crate::ai_client::{AiClient, ApiMessage};
+use crate::ai_client::{should_roundtrip_reasoning_content, AiClient, ApiMessage};
 use crate::ai_conversations::{self, PersistedMessage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -19,6 +19,8 @@ pub enum StreamMsg {
     /// Model is about to emit text: renderer should push an empty assistant placeholder.
     AssistantStart,
     Token(String),
+    /// Hidden provider reasoning, stored separately from visible assistant text.
+    Reasoning(String),
     ToolStart {
         name: String,
         args_preview: String,
@@ -318,14 +320,30 @@ pub(crate) fn run_agent(
         }
 
         let tx_c = tx.clone();
-        let mut sent_start = false;
-        let tool_calls = match client.chat_step(&model, &messages, &tools, &cancel, &mut |token| {
-            if !sent_start {
-                let _ = tx_c.send(StreamMsg::AssistantStart);
-                sent_start = true;
-            }
-            let _ = tx_c.send(StreamMsg::Token(token.to_string()));
-        }) {
+        let tx_r = tx.clone();
+        let sent_start = std::cell::Cell::new(false);
+        let mut reasoning_buf = String::new();
+        let tool_calls = match client.chat_step(
+            &model,
+            &messages,
+            &tools,
+            &cancel,
+            &mut |token| {
+                if !sent_start.get() {
+                    let _ = tx_c.send(StreamMsg::AssistantStart);
+                    sent_start.set(true);
+                }
+                let _ = tx_c.send(StreamMsg::Token(token.to_string()));
+            },
+            &mut |reasoning| {
+                if !sent_start.get() {
+                    let _ = tx_r.send(StreamMsg::AssistantStart);
+                    sent_start.set(true);
+                }
+                reasoning_buf.push_str(reasoning);
+                let _ = tx_r.send(StreamMsg::Reasoning(reasoning.to_string()));
+            },
+        ) {
             Ok(tc) => tc,
             Err(e) => {
                 let _ = tx.send(StreamMsg::Err(e.to_string()));
@@ -348,9 +366,11 @@ pub(crate) fn run_agent(
                 })
             })
             .collect();
-        messages.push(ApiMessage::assistant_tool_calls(serde_json::Value::Array(
-            tc_json,
-        )));
+        let mut assistant_msg = ApiMessage::assistant_tool_calls(serde_json::Value::Array(tc_json));
+        if should_roundtrip_reasoning_content(&model) && !reasoning_buf.is_empty() {
+            assistant_msg.0["reasoning_content"] = serde_json::Value::String(reasoning_buf);
+        }
+        messages.push(assistant_msg);
 
         for tc in &tool_calls {
             if cancel.load(Ordering::Relaxed) {
@@ -674,6 +694,7 @@ impl Engine {
         self.messages.push(PersistedMessage {
             role: "user".to_string(),
             content: user_input.clone(),
+            reasoning_content: String::new(),
             attachments: vec![],
             round_id,
         });
@@ -704,12 +725,17 @@ impl Engine {
         rx
     }
 
-    /// Record the completed assistant response and persist the conversation.
     pub fn record_assistant(&mut self, content: String) {
+        self.record_assistant_with_reasoning(content, String::new());
+    }
+
+    /// Record the completed assistant response and persist the conversation.
+    pub fn record_assistant_with_reasoning(&mut self, content: String, reasoning_content: String) {
         let round_id = self.last_round_id();
         self.messages.push(PersistedMessage {
             role: "assistant".to_string(),
             content,
+            reasoning_content,
             attachments: vec![],
             round_id,
         });
@@ -762,7 +788,16 @@ impl Engine {
         for msg in real.into_iter().skip(skip) {
             match msg.role.as_str() {
                 "user" => out.push(ApiMessage::user(&msg.content)),
-                "assistant" => out.push(ApiMessage::assistant(&msg.content)),
+                "assistant" => {
+                    if should_roundtrip_reasoning_content(&self.model) {
+                        out.push(ApiMessage::assistant_with_reasoning(
+                            &msg.content,
+                            &msg.reasoning_content,
+                        ));
+                    } else {
+                        out.push(ApiMessage::assistant(&msg.content));
+                    }
+                }
                 _ => {}
             }
         }
@@ -785,6 +820,36 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_client::AssistantConfig;
+
+    fn test_client() -> AiClient {
+        AiClient::new(AssistantConfig {
+            api_key: "test-key".to_string(),
+            chat_model: "deepseek-v4-pro".to_string(),
+            chat_model_choices: vec![],
+            base_url: "https://example.com/v1".to_string(),
+            custom_headers: vec![],
+            provider: "Custom".to_string(),
+            auth_type: "api_key".to_string(),
+            chat_tools_enabled: true,
+            web_search_provider: None,
+            web_search_api_key: None,
+            web_fetch_script: None,
+            fast_model: None,
+            memory_curator_model: None,
+        })
+    }
+
+    fn test_engine(model: &str) -> Engine {
+        Engine {
+            active_id: String::new(),
+            messages: vec![],
+            client: test_client(),
+            model: model.to_string(),
+            cwd: "/tmp".to_string(),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
 
     #[test]
     fn middle_truncate_short_passthrough() {
@@ -837,6 +902,50 @@ mod tests {
         assert_eq!(tool_result_preview("fs_write", "anything"), "done");
         assert_eq!(tool_result_preview("fs_patch", "anything"), "done");
         assert_eq!(tool_result_preview("fs_delete", "anything"), "done");
+    }
+
+    #[test]
+    fn build_api_messages_roundtrips_reasoning_for_deepseek_models() {
+        let mut engine = test_engine("deepseek-v4-pro");
+        engine.messages.push(PersistedMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            reasoning_content: String::new(),
+            attachments: vec![],
+            round_id: 0,
+        });
+        engine.record_assistant_with_reasoning("visible".to_string(), "hidden".to_string());
+
+        let api_messages = engine.build_api_messages();
+        let assistant = api_messages
+            .iter()
+            .rev()
+            .find(|m| m.0["role"] == "assistant")
+            .unwrap();
+        assert_eq!(assistant.0["content"], "visible");
+        assert_eq!(assistant.0["reasoning_content"], "hidden");
+    }
+
+    #[test]
+    fn build_api_messages_omits_reasoning_for_non_reasoning_models() {
+        let mut engine = test_engine("gpt-5.4");
+        engine.messages.push(PersistedMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            reasoning_content: String::new(),
+            attachments: vec![],
+            round_id: 0,
+        });
+        engine.record_assistant_with_reasoning("visible".to_string(), "hidden".to_string());
+
+        let api_messages = engine.build_api_messages();
+        let assistant = api_messages
+            .iter()
+            .rev()
+            .find(|m| m.0["role"] == "assistant")
+            .unwrap();
+        assert_eq!(assistant.0["content"], "visible");
+        assert!(assistant.0.get("reasoning_content").is_none());
     }
 
     #[test]

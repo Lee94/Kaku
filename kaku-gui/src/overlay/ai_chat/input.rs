@@ -161,6 +161,13 @@ pub(super) fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
             Action::Continue
         }
 
+        // Toggle thinking/reasoning content visibility (Ctrl+O, matching Claude Code).
+        (KeyCode::Char('O'), Modifiers::CTRL) => {
+            app.show_thinking = !app.show_thinking;
+            app.display_lines_dirty = true;
+            Action::Continue
+        }
+
         // Undo the last destructive input edit (macOS-native Cmd+Z).
         (KeyCode::Char('z'), Modifiers::SUPER) | (KeyCode::Char('Z'), Modifiers::SUPER) => {
             app.undo_input();
@@ -514,6 +521,7 @@ fn extract_selection_text(app: &App) -> Option<String> {
                 (format!("{}{}", indent, segments_to_plain(segments)), indent)
             }
             DisplayLine::LoadingDot => (String::new(), ""),
+            DisplayLine::ThinkingHeader { .. } => (String::new(), ""),
             DisplayLine::Blank => (String::new(), ""),
         };
 
