@@ -560,16 +560,25 @@ echo -e "  ${GREEN}✓${NC} ${BOLD}Tools${NC}       Installed Zsh plugins ${NC}(
 # Copy Starship Config (if not exists)
 if [[ ! -f "$STARSHIP_CONFIG" ]]; then
 	if [[ -f "$VENDOR_DIR/starship.toml" ]]; then
-		mkdir -p "$(dirname "$STARSHIP_CONFIG")"
-		cp "$VENDOR_DIR/starship.toml" "$STARSHIP_CONFIG"
-		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized starship.toml ${NC}(~/.config/starship.toml)${NC}"
+		local starship_dir
+		starship_dir="$(dirname "$STARSHIP_CONFIG")"
+		if [[ -L "$starship_dir" || ( -e "$starship_dir" && ! -w "$starship_dir" ) ]]; then
+			echo -e "  ${YELLOW}!${NC} ${BOLD}Config${NC}      Skipped starship.toml ${NC}($starship_dir is read-only or a symlink)${NC}"
+		else
+			mkdir -p "$starship_dir"
+			cp "$VENDOR_DIR/starship.toml" "$STARSHIP_CONFIG"
+			echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized starship.toml ${NC}(~/.config/starship.toml)${NC}"
+		fi
 	fi
 fi
 
 # Initialize Yazi layout config if the user has not created one yet.
 if [[ ! -f "$YAZI_CONFIG_FILE" ]]; then
-	mkdir -p "$YAZI_CONFIG_DIR"
-	cat <<EOF >"$YAZI_CONFIG_FILE"
+	if [[ -L "$YAZI_CONFIG_DIR" || ( -e "$YAZI_CONFIG_DIR" && ! -w "$YAZI_CONFIG_DIR" ) ]]; then
+		echo -e "  ${YELLOW}!${NC} ${BOLD}Config${NC}      Skipped yazi.toml ${NC}($YAZI_CONFIG_DIR is read-only or a symlink)${NC}"
+	else
+		mkdir -p "$YAZI_CONFIG_DIR"
+		cat <<EOF >"$YAZI_CONFIG_FILE"
 [mgr]
 ratio = [3, 3, 10]
 
@@ -582,7 +591,8 @@ edit = [
   { run = "\${EDITOR:-vim} %s", desc = "edit", for = "unix", block = true },
 ]
 EOF
-	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized yazi.toml ${NC}(~/.config/yazi/yazi.toml)${NC}"
+		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized yazi.toml ${NC}(~/.config/yazi/yazi.toml)${NC}"
+	fi
 fi
 
 ensure_yazi_preview_size_defaults() {
@@ -1016,6 +1026,10 @@ bindkey '^E' _kaku_mv_end_of_line
 bindkey '^?' backward-delete-char
 bindkey '^H' backward-delete-char
 bindkey '^[[3~' delete-char
+# Cmd+Backspace sends ^U via the default Kaku key binding. zsh emacs mode
+# defaults ^U to kill-whole-line, which also deletes text after the cursor;
+# backward-kill-line matches macOS/readline delete-to-line-start behavior.
+bindkey '^U' backward-kill-line
 bindkey '^G' send-break
 
 # Directory Navigation Options
@@ -2046,19 +2060,25 @@ if has_kaku_path_line && has_kaku_source_line; then
 elif [[ "$LEGACY_INLINE_BLOCK_PRESERVED" == "1" ]]; then
 	echo -e "  ${BLUE}•${NC} ${BOLD}Integrate${NC}   Preserved legacy inline Kaku block ${NC}(move custom lines outside it, then rerun kaku init)${NC}"
 else
-	# Backup existing .zshrc only if it doesn't have Kaku logic yet
-	backup_zshrc_once
+	if [[ -f "$ZSHRC" && ! -w "$ZSHRC" ]]; then
+		echo -e "  ${YELLOW}!${NC} ${BOLD}Integrate${NC}   .zshrc is read-only (symlink or permission). Add manually:"
+		echo -e "              $PATH_LINE"
+		echo -e "              $SOURCE_LINE"
+	else
+		# Backup existing .zshrc only if it doesn't have Kaku logic yet
+		backup_zshrc_once
 
-	if [[ -f "$ZSHRC" && -s "$ZSHRC" ]]; then
-		echo "" >>"$ZSHRC"
+		if [[ -f "$ZSHRC" && -s "$ZSHRC" ]]; then
+			echo "" >>"$ZSHRC"
+		fi
+		if ! has_kaku_path_line; then
+			echo "$PATH_LINE" >>"$ZSHRC"
+		fi
+		if ! has_kaku_source_line; then
+			echo "$SOURCE_LINE" >>"$ZSHRC"
+		fi
+		echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Successfully patched .zshrc"
 	fi
-	if ! has_kaku_path_line; then
-		echo "$PATH_LINE" >>"$ZSHRC"
-	fi
-	if ! has_kaku_source_line; then
-		echo "$SOURCE_LINE" >>"$ZSHRC"
-	fi
-	echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Successfully patched .zshrc"
 fi
 
 # 6. Configure TouchID for Sudo (Optional)
