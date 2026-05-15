@@ -4164,11 +4164,13 @@ config.keys = (function() return {
       local tabs = mux_win and mux_win:tabs() or {}
       local current_tab = pane:tab()
       local panes = current_tab and current_tab:panes() or {}
+      local dims = win:get_dimensions()
+      local is_full_screen = dims and dims.is_full_screen
       if #panes > 1 then
         win:perform_action(wezterm.action.CloseCurrentPane { confirm = true }, pane)
       else
         local should_close_tab = (#tabs > 1) or (#wezterm.mux.all_windows() > 1)
-        if should_close_tab then
+        if should_close_tab or is_full_screen then
           win:perform_action(wezterm.action.CloseCurrentTab { confirm = true }, pane)
           return
         end

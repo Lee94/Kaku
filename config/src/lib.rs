@@ -980,6 +980,19 @@ mod tests {
             "bundled kaku.lua should read remember_last_cwd from the parsed config table"
         );
     }
+
+    #[test]
+    fn bundled_kaku_lua_closes_fullscreen_last_window_on_cmd_w() {
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../assets/macos/Kaku.app/Contents/Resources/kaku.lua");
+        let content = std::fs::read_to_string(&bundled).expect("read bundled kaku.lua");
+
+        assert!(
+            content.contains("local is_full_screen = dims and dims.is_full_screen")
+                && content.contains("if should_close_tab or is_full_screen then"),
+            "Cmd+W should close the last fullscreen tab instead of hiding the app"
+        );
+    }
 }
 
 pub fn set_config_file_override(path: &Path) {

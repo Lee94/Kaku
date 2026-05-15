@@ -651,6 +651,37 @@ fn last_closed_window_position() -> Option<ScreenPoint> {
     LAST_CLOSED_WINDOW_POSITION.with(|last_pos| *last_pos.borrow())
 }
 
+fn should_perform_native_window_drag(
+    in_fullscreen: bool,
+    is_zoomed: bool,
+    fills_visible_frame: bool,
+) -> bool {
+    !in_fullscreen && !is_zoomed && !fills_visible_frame
+}
+
+fn nsrect_approx_eq(a: NSRect, b: NSRect, tolerance: f64) -> bool {
+    (a.origin.x - b.origin.x).abs() <= tolerance
+        && (a.origin.y - b.origin.y).abs() <= tolerance
+        && (a.size.width - b.size.width).abs() <= tolerance
+        && (a.size.height - b.size.height).abs() <= tolerance
+}
+
+fn window_fills_visible_frame(window: id) -> bool {
+    if window.is_null() {
+        return false;
+    }
+
+    unsafe {
+        let screen: id = msg_send![window, screen];
+        if screen.is_null() {
+            return false;
+        }
+        let frame = NSWindow::frame(window);
+        let visible_frame: NSRect = msg_send![screen, visibleFrame];
+        nsrect_approx_eq(frame, visible_frame, 1.0)
+    }
+}
+
 fn window_size(window: *mut Object) -> PersistedWindowSize {
     unsafe {
         let frame = NSWindow::frame(window);
@@ -3376,6 +3407,14 @@ mod tests {
     }
 
     #[test]
+    fn native_drag_is_disabled_for_fullscreen_and_maximized_frames() {
+        assert!(should_perform_native_window_drag(false, false, false));
+        assert!(!should_perform_native_window_drag(true, false, false));
+        assert!(!should_perform_native_window_drag(false, true, false));
+        assert!(!should_perform_native_window_drag(false, false, true));
+    }
+
+    #[test]
     fn none_decorations_use_a_borderless_window() {
         let mask = decoration_to_mask(
             WindowDecorations::NONE,
@@ -4122,17 +4161,22 @@ impl WindowView {
         Self::mouse_common(this, nsevent, MouseEventKind::Press(MousePress::Left));
 
         // Execute drag synchronously: app layer may call request_drag_move() in mouse_common to set flag
-        // But skip if in fullscreen mode or if the window is zoomed (maximized). On macOS Sequoia,
-        // calling performWindowDragWithEvent: on a zoomed window whose frame already touches the top
-        // screen edge causes window managers (Raycast, Magnet, etc.) to immediately snap the window
-        // to fullscreen on a single click. Use double-click to un-zoom instead.
+        // But skip if in fullscreen mode or if the window is zoomed/maximized. On macOS,
+        // performWindowDragWithEvent: can be interpreted as a snap/maximize gesture when the
+        // frame already fills the visible screen even if isZoomed is stale. Use double-click
+        // to un-zoom instead of letting a single title-area click expand the window.
         let pending_drag = PENDING_DRAG_MOVE.with(|flag| flag.replace(false));
         if pending_drag && !in_fullscreen {
             unsafe {
                 let window: id = msg_send![this as id, window];
                 if window != nil {
                     let is_zoomed: bool = msg_send![window, isZoomed];
-                    if !is_zoomed {
+                    let fills_visible_frame = window_fills_visible_frame(window);
+                    if should_perform_native_window_drag(
+                        in_fullscreen,
+                        is_zoomed,
+                        fills_visible_frame,
+                    ) {
                         let () = msg_send![window, performWindowDragWithEvent: nsevent];
                     }
                 }
