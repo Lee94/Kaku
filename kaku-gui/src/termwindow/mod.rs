@@ -1756,6 +1756,15 @@ impl TermWindow {
         });
         config::enable_deferred_watchers();
 
+        // Show the window before GPU initialization so it appears immediately,
+        // matching pre-0.10 startup feel. The dark-theme titlebar vibrancy
+        // flash is already prevented by apply_window_appearance, which pins the
+        // NSWindow's NSAppearance to the resolved theme at window-creation time
+        // (see apply_window_appearance in window/src/os/macos/window.rs).
+        crate::startup_trace::mark("  window.show() start");
+        window.show();
+        crate::startup_trace::mark("  window.show() done");
+
         crate::startup_trace::mark("  GPU init start");
         let (gl, webgpu) = match config.front_end {
             FrontEndSelection::WebGpu => match WebGpuState::new(&window, dimensions, &config).await
@@ -1775,15 +1784,6 @@ impl TermWindow {
             _ => (Some(window.enable_opengl().await?), None),
         };
         crate::startup_trace::mark("  GPU init done");
-
-        // Show the window only after the GPU surface is attached, so the very
-        // first visible frame composites the GPU layer over the AppKit chrome.
-        // Showing earlier exposes a window of time where NSTitlebarContainerView's
-        // vibrancy material renders the system appearance, which on a dark theme
-        // produces a brief light strip at the top of the window.
-        crate::startup_trace::mark("  window.show() start");
-        window.show();
-        crate::startup_trace::mark("  window.show() done");
 
         {
             let mut myself = tw.borrow_mut();
