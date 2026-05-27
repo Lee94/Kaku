@@ -46,6 +46,8 @@ make app
 - Do not modify files outside this repository without showing the intended change and getting explicit confirmation.
 - Do not add instructions for the removed `website/` tree unless that directory exists in the current worktree.
 - Keep private credentials, local keychain paths, and machine-specific release notes out of public repository docs.
+- **Do not propose UI i18n / multi-language menus / a `config.language` setting.** The `rust-i18n` based Chinese UI localization (PR #362, commit `f6cfb4b`) was reverted on 2026-05-18; `language` remains in the config schema as a deprecated field for backward compat only. UI strings (`tab.empty_pane`, menus, confirm dialogs, config TUI copy) stay as English literal strings. New UI surfaces should not introduce translation keys, locale-aware formatting, or "what if a user wants Chinese" abstractions. If a user requests a non-English UI, route to the assistant config / AI chat surface; those already accept non-English content.
+- **Do not pre-bake provider abstractions in `kaku/src/ai_config/`.** The `mod provider_adapter` trait scaffolding for the 9 AI providers (KakuAssistant, ClaudeCode, Codex, Copilot, Kimi, Antigravity, Gemini, FactoryDroid, OpenClaw) was deleted on 2026-05-26 after sitting at zero implementations for half a year. When provider work is actually needed, start with a single concrete migration (one PR moves KakuAssistant's four functions from `tui.rs` to `providers/kaku_assistant.rs`); do not spec out a trait, a `ProviderKind` enum, or stub modules ahead of time. Save Copilot for last because its OAuth flow is the real abstraction stress test.
 
 ## Maintainer Follow-up
 
@@ -71,6 +73,12 @@ For AI-facing behavior, inspect in this order:
 2. GUI AI state and transport under `kaku-gui/src/ai_*`, `kaku-gui/src/ai_chat_engine/`, and `kaku-gui/src/cli_chat/`.
 3. Overlay UI under `kaku-gui/src/overlay/ai_chat/`.
 4. Shared helpers in `crates/kaku-ai-utils/`.
+
+For `Ctrl+letter` not working in a raw-mode TUI (the most common shape: `Ctrl+C` / `Ctrl+R` works in plain shell but not inside a TUI overlay), inspect in this order:
+
+1. AppKit menu `keyEquivalent` intercepting `keyDown` before the terminal sees it. Enable `config.debug_key_events = true`, restart the app, then `grep 'key_event.*CTRL' ~/.local/share/kaku/kaku-gui-log-<pid>.txt`. If the log shows only `key_is_down: false` and no matching `key_is_down: true`, the AppKit menu absorbed the event; do not chase termwiz or PTY.
+2. Cooked-mode tests (`cat -v` showing `^C`) do **not** rule out menu interception. Reproduce inside a raw-mode TUI before forming a hypothesis.
+3. Only after step 1 rules out menu interception, inspect termwiz encoding (`crates/termwiz/src/input.rs`), then PTY / termios state.
 
 ## Subsystem Guides
 
