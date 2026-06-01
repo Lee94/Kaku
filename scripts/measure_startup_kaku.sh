@@ -2,8 +2,9 @@
 # scripts/measure_startup_kaku.sh
 #
 # Measure Kaku.app cold-start time and emit a JSON report compatible with
-# scripts/check_startup_budget.sh. Use this as the data source for the budget
-# gate in CI.
+# scripts/check_startup_budget.sh. Local-only helper: the budget gate is
+# intentionally not wired into CI yet (no committed baseline). Reported
+# numbers are hyperfine means, not P95.
 #
 # Output (stdout):
 #   {

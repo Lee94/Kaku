@@ -5264,7 +5264,14 @@ impl WindowView {
                 }
             }
 
+            // Complete the deferred hide requested in order_out(). Consume the
+            // flag unconditionally: there is no retry trigger on this path, so
+            // leaving it set would not heal a failed hide and could orderOut:
+            // a window the user later brings back to fullscreen. If orderOut:
+            // cannot run (inner transiently borrowed, or the window pointer is
+            // gone), log it rather than silently dropping the request.
             if this.order_out_on_fullscreen_exit.replace(false) {
+                let mut hidden = false;
                 if let Ok(inner) = this.inner.try_borrow() {
                     if let Some(window) = inner.window.as_ref() {
                         let window = window.load();
@@ -5272,8 +5279,15 @@ impl WindowView {
                             unsafe {
                                 let () = msg_send![*window, orderOut: nil];
                             }
+                            hidden = true;
                         }
                     }
+                }
+                if !hidden {
+                    log::warn!(
+                        "fullscreen exit could not complete deferred orderOut:; \
+                         window may remain visible"
+                    );
                 }
             }
         }

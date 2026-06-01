@@ -11,8 +11,12 @@
 #   BUDGET_FILE=custom_budget.toml scripts/check_startup_budget.sh report.json
 #
 # The budget file is a tiny TOML with two integer keys:
-#   cold_start_p95_ms = <number>
-#   warm_start_p95_ms = <number>
+#   cold_start_budget_ms = <number>
+#   warm_start_budget_ms = <number>
+#
+# Budgets are derived from the hyperfine *mean* (see measure_startup_kaku.sh),
+# not a P95. This is a local-only helper; the CI gate is intentionally not
+# wired up yet (no committed baseline).
 
 set -euo pipefail
 
@@ -37,18 +41,18 @@ if [[ -z "$cold" || -z "$warm" ]]; then
   exit 2
 fi
 
-cold_max=$(awk -F= '/^cold_start_p95_ms[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2}' "$budget_file")
-warm_max=$(awk -F= '/^warm_start_p95_ms[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2}' "$budget_file")
+cold_max=$(awk -F= '/^cold_start_budget_ms[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2}' "$budget_file")
+warm_max=$(awk -F= '/^warm_start_budget_ms[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2}' "$budget_file")
 
 if [[ -z "$cold_max" || -z "$warm_max" ]]; then
-  echo "ERROR: $budget_file missing cold_start_p95_ms / warm_start_p95_ms" >&2
+  echo "ERROR: $budget_file missing cold_start_budget_ms / warm_start_budget_ms" >&2
   exit 2
 fi
 
 if [[ "$cold_max" -eq 0 || "$warm_max" -eq 0 ]]; then
   echo "WARN: budget is 0 (placeholder). Run scripts/measure_startup_kaku.sh"
-  echo "      locally, take the P95 of ~10 runs, multiply by 1.2, and write"
-  echo "      the result into $budget_file before turning this gate hard."
+  echo "      locally over ~10 runs, take the reported mean, multiply by 1.5,"
+  echo "      and write the result into $budget_file before turning this gate hard."
   exit 0
 fi
 

@@ -724,7 +724,18 @@ impl super::TermWindow {
             }
             WMEK::VertWheel(_) | WMEK::HorzWheel(_) => {
                 if self.window_drag.is_window_dragging {
-                    return;
+                    if event.mouse_buttons == WMB::NONE {
+                        // Defensive reset, mirroring the Move arm: a native
+                        // drag can end without us seeing the release (AppKit
+                        // consumes it). Without this, a stale drag flag would
+                        // suppress wheel scrolling forever until a Move event
+                        // happens to arrive.
+                        self.window_drag.is_window_dragging = false;
+                        self.current_mouse_capture = None;
+                    } else {
+                        // Drag still in progress; suppress wheel handling.
+                        return;
+                    }
                 }
                 if event.mouse_buttons != WMB::NONE
                     && !matches!(

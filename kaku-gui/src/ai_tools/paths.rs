@@ -69,7 +69,50 @@ pub(crate) fn reject_if_sensitive(path: &Path) -> Result<()> {
             );
         }
     }
+
+    // Name-pattern guard: credential files live anywhere, not just in the
+    // fixed locations above. Check both the requested name and the
+    // canonicalized name so a symlink cannot launder a `.env` past the guard.
+    for candidate in [path, canon.as_path()] {
+        if let Some(name) = candidate.file_name().and_then(|n| n.to_str()) {
+            if is_sensitive_filename(name) {
+                anyhow::bail!("refused: '{}' looks like a credential file", path.display());
+            }
+        }
+    }
     Ok(())
+}
+
+/// File-name patterns that commonly hold secrets regardless of directory
+/// (`.env`, private keys, PEM material). Obvious example/template files are
+/// allowed because they are committed to repos on purpose and carry no
+/// secrets.
+fn is_sensitive_filename(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+
+    // `.env.example`, `config.pem.sample`, `secrets.key.template`, ... are
+    // placeholders, not real credentials.
+    const ALLOW_SUFFIXES: [&str; 4] = [".example", ".sample", ".template", ".dist"];
+    if ALLOW_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return false;
+    }
+
+    // Dotenv files: `.env`, `.env.local`, `.env.production`, ...
+    if lower == ".env" || lower.starts_with(".env.") {
+        return true;
+    }
+
+    // Private key material by extension.
+    if lower.ends_with(".pem") || lower.ends_with(".key") {
+        return true;
+    }
+
+    // Well-known SSH private key file names. Public `.pub` siblings do not
+    // match the exact names, so they stay readable.
+    matches!(
+        lower.as_str(),
+        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519"
+    )
 }
 
 /// Handles `~/…` expansion and relative paths (resolved against `cwd`).
@@ -335,29 +378,60 @@ mod tests {
             .expect("in-cwd traversal must be allowed");
     }
 
-    // ─── Known gap, intentionally not fixed in this test pass ──────────
+    // ─── Credential file-name guard ───────────────────────────────────
     //
-    // `reject_if_sensitive` only blocks well-known absolute paths and the
-    // `~/.ssh`, `~/.aws/credentials`, `~/.gnupg`, `~/.config/kaku/...`
-    // prefixes. It does NOT block file-name patterns like `id_rsa`, `.env`,
-    // `*.pem`, `*.key`. A project-local `.env` containing credentials is
-    // therefore readable by the AI tools.
-    //
-    // Adding name-pattern filtering would be a behavior change with real
-    // false-positive risk (legitimate `.env.example` files are common), so
-    // it's tracked separately rather than slipped in with the audit tests.
+    // `reject_if_sensitive` blocks well-known credential file names
+    // (`.env`, `*.pem`, `*.key`, SSH private keys) in any directory, while
+    // still allowing committed example/template files.
     #[test]
-    fn known_gap_reject_if_sensitive_does_not_block_env_files() {
-        // This test pins the *current* behavior. When a future PR adds
-        // name-pattern blocking, flip this assertion to `is_err()` and
-        // remove the gap note above.
+    fn reject_if_sensitive_blocks_project_env_file() {
         let dir = tempfile::tempdir().unwrap();
         let env_file = dir.path().join(".env");
         std::fs::write(&env_file, "API_KEY=secret").unwrap();
         assert!(
-            reject_if_sensitive(&env_file).is_ok(),
-            "current behavior: .env files are NOT blocked. \
-             If this assertion fails, the policy was tightened, update the gap note."
+            reject_if_sensitive(&env_file).is_err(),
+            "a project-local .env must be refused"
         );
+    }
+
+    #[test]
+    fn reject_if_sensitive_blocks_dotenv_variants_and_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            ".env.local",
+            ".env.production",
+            "server.pem",
+            "tls.key",
+            "id_rsa",
+            "id_ed25519",
+        ] {
+            let f = dir.path().join(name);
+            std::fs::write(&f, "secret").unwrap();
+            assert!(
+                reject_if_sensitive(&f).is_err(),
+                "{} should be refused as a credential file",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn reject_if_sensitive_allows_env_examples_and_public_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            ".env.example",
+            ".env.sample",
+            "config.pem.template",
+            "id_rsa.pub",
+            "README.md",
+        ] {
+            let f = dir.path().join(name);
+            std::fs::write(&f, "not a secret").unwrap();
+            assert!(
+                reject_if_sensitive(&f).is_ok(),
+                "{} should remain readable",
+                name
+            );
+        }
     }
 }

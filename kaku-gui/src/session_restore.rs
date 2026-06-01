@@ -35,6 +35,16 @@ const WEZTERM_SURFACE_FINGERPRINT: &str = "wezterm-surface-2026-05";
 /// bincode sidecars under a few MB each.
 const PANE_CONTENT_CAP_LINES: usize = 1500;
 
+/// Hard byte ceiling for a single pane's serialized scrollback sidecar.
+/// The line cap above bounds text, but a `Line` can carry `ImageCell`
+/// payloads (sixel / iTerm2 images) whose `Arc<ImageData>` blobs are not
+/// counted by the line cap. An image-heavy pane could otherwise serialize
+/// to tens of MB and reload that blob on every session restore. When the
+/// encoded sidecar exceeds this ceiling we skip persisting that pane's
+/// content (structural snapshot is unaffected) rather than write a giant
+/// file. 4 MiB leaves generous headroom for the text cap above.
+const PANE_CONTENT_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 // Envelope written on app quit: continue-where-you-left-off.
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedSession {
@@ -286,15 +296,30 @@ fn capture_pane_content(
 }
 
 /// Atomic write for bincode payloads, mirroring `write_json_atomic`.
+///
+/// `max_bytes` is an optional ceiling on the encoded size. When the
+/// serialized payload exceeds it the write is refused with an error before
+/// touching disk, so the caller can degrade gracefully instead of
+/// persisting an oversized file.
 fn write_bincode_atomic<T: Serialize>(
     file_name: &std::path::Path,
     value: &T,
+    max_bytes: Option<usize>,
 ) -> anyhow::Result<()> {
     if let Some(parent) = file_name.parent() {
         config::create_user_owned_dirs(parent)
             .with_context(|| format!("create content dir {}", parent.display()))?;
     }
     let encoded = bincode::serialize(value).context("encode pane content")?;
+    if let Some(max) = max_bytes {
+        if encoded.len() > max {
+            return Err(anyhow!(
+                "encoded payload is {} bytes, exceeding the {} byte ceiling",
+                encoded.len(),
+                max
+            ));
+        }
+    }
     let tmp = file_name.with_file_name(format!(
         "{}.{}.{}.tmp",
         file_name.file_stem().unwrap_or_default().to_string_lossy(),
@@ -333,7 +358,7 @@ fn write_pane_sidecar(
         rows,
         lines,
     };
-    match write_bincode_atomic(&path, &payload) {
+    match write_bincode_atomic(&path, &payload, Some(PANE_CONTENT_MAX_BYTES)) {
         Ok(()) => Some(PaneContentRef {
             filename,
             schema: CONTENT_SCHEMA_VERSION,
@@ -658,15 +683,28 @@ pub fn save_closed_window_snapshot(window_id: MuxWindowId) -> anyhow::Result<()>
             content_dir.display()
         );
     }
-    let snapshot = build_snapshot_for_window(window_id, Some(&content_dir))?;
+    let snapshot = match build_snapshot_for_window(window_id, Some(&content_dir)) {
+        Ok(s) => s,
+        Err(e) => {
+            // The envelope will never reference this dir; drop its sidecars.
+            let _ = std::fs::remove_dir_all(&content_dir);
+            return Err(e);
+        }
+    };
     let envelope = SavedClosedWindow {
         version: SNAPSHOT_VERSION,
         content_dir: content_dir_name,
         window: snapshot,
     };
     let result = write_json_atomic(&closed_window_file(), &envelope);
-    if result.is_ok() {
-        gc_kept_content_dirs();
+    match &result {
+        Ok(()) => gc_kept_content_dirs(),
+        // Envelope was never persisted, so gc (which keeps only referenced
+        // dirs) would not have caught this one until some later successful
+        // save. Remove the now-unreferenced sidecars now.
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&content_dir);
+        }
     }
     result
 }
@@ -732,8 +770,13 @@ pub fn save_session_snapshot() -> anyhow::Result<()> {
         windows,
     };
     let result = write_json_atomic(&session_file(), &session);
-    if result.is_ok() {
-        gc_kept_content_dirs();
+    match &result {
+        Ok(()) => gc_kept_content_dirs(),
+        // Envelope was never persisted; drop the orphaned sidecar dir instead
+        // of waiting for a later successful save to gc it.
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&content_dir);
+        }
     }
     result
 }
@@ -1356,7 +1399,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pane_42.bin");
         let payload = sample_payload(80, 24, 5);
-        write_bincode_atomic(&path, &payload).unwrap();
+        write_bincode_atomic(&path, &payload, None).unwrap();
 
         let content_ref = PaneContentRef {
             filename: "pane_42.bin".into(),
@@ -1392,7 +1435,7 @@ mod tests {
         let path = dir.path().join("pane_7.bin");
         let mut payload = sample_payload(80, 24, 2);
         payload.schema = u32::MAX;
-        write_bincode_atomic(&path, &payload).unwrap();
+        write_bincode_atomic(&path, &payload, None).unwrap();
 
         let content_ref = PaneContentRef {
             filename: "pane_7.bin".into(),
@@ -1410,7 +1453,7 @@ mod tests {
         let path = dir.path().join("pane_8.bin");
         let mut payload = sample_payload(80, 24, 2);
         payload.fingerprint = "wezterm-surface-from-the-future".to_string();
-        write_bincode_atomic(&path, &payload).unwrap();
+        write_bincode_atomic(&path, &payload, None).unwrap();
 
         let content_ref = PaneContentRef {
             filename: "pane_8.bin".into(),
@@ -1420,6 +1463,34 @@ mod tests {
             line_count: 2,
         };
         assert!(load_pane_payload(dir.path(), &content_ref).is_none());
+    }
+
+    #[test]
+    fn write_bincode_atomic_refuses_oversized_payload() {
+        // An image-heavy pane can serialize far past the line cap. A tiny
+        // byte ceiling stands in for that here: the write must be refused
+        // and no file should be left behind.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane_huge.bin");
+        let payload = sample_payload(80, 24, 200);
+        let err = write_bincode_atomic(&path, &payload, Some(16))
+            .expect_err("payload over the ceiling must be refused");
+        assert!(
+            err.to_string().contains("exceeding"),
+            "unexpected error: {:#}",
+            err
+        );
+        assert!(!path.exists(), "no sidecar file should be written");
+    }
+
+    #[test]
+    fn write_bincode_atomic_allows_payload_within_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane_ok.bin");
+        let payload = sample_payload(80, 24, 3);
+        write_bincode_atomic(&path, &payload, Some(PANE_CONTENT_MAX_BYTES))
+            .expect("small payload must write within the ceiling");
+        assert!(path.exists());
     }
 
     #[test]

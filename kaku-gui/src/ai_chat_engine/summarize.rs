@@ -81,18 +81,14 @@ fn is_summary_message(msg: &ApiMessage) -> bool {
     role_of(msg) == "user" && content_of(msg).starts_with(SUMMARY_PREFIX)
 }
 
-fn first_tool_interaction(messages: &[ApiMessage]) -> Option<usize> {
-    messages
-        .iter()
-        .position(|msg| has_tool_calls(msg) || is_tool_result(msg))
-}
-
-fn active_tool_sequence_start(messages: &[ApiMessage], first_tool: usize) -> usize {
-    messages[PREFIX_KEEP..first_tool]
+/// Index of the user message that initiated the tool sequence ending at
+/// `boundary`. Falls back to `boundary` when no user turn precedes it.
+fn active_tool_sequence_start(messages: &[ApiMessage], boundary: usize) -> usize {
+    messages[PREFIX_KEEP..boundary]
         .iter()
         .rposition(|msg| role_of(msg) == "user")
         .map(|idx| PREFIX_KEEP + idx)
-        .unwrap_or(first_tool)
+        .unwrap_or(boundary)
 }
 
 fn summary_split_index(messages: &[ApiMessage]) -> Option<usize> {
@@ -101,13 +97,22 @@ fn summary_split_index(messages: &[ApiMessage]) -> Option<usize> {
     }
 
     let mut split = messages.len() - KEEP_TAIL;
-    if let Some(first_tool) = first_tool_interaction(&messages[PREFIX_KEEP..]) {
-        let first_tool = PREFIX_KEEP + first_tool;
-        split = split.min(active_tool_sequence_start(messages, first_tool));
-    }
 
+    // Never orphan a tool result from its tool_calls: if the tail would begin
+    // on a tool result, walk the boundary back until it doesn't.
     while split > PREFIX_KEEP && is_tool_result(&messages[split]) {
         split -= 1;
+    }
+
+    // If the tail now begins on an assistant tool_calls turn, pull the split
+    // back to the user message that initiated *that* sequence so the
+    // initiating prompt is not folded away from its tool exchange. This
+    // anchors on the sequence straddling the boundary, not the first tool use
+    // in the whole conversation. Anchoring on the first tool use previously
+    // dragged the split to the start and disabled folding entirely whenever
+    // tools ran early in the session.
+    if split > PREFIX_KEEP && has_tool_calls(&messages[split]) {
+        split = active_tool_sequence_start(messages, split);
     }
 
     if split <= PREFIX_KEEP {
@@ -224,6 +229,30 @@ mod tests {
         ];
 
         assert_eq!(summary_split_index(&messages), Some(4));
+    }
+
+    #[test]
+    fn summary_split_folds_when_tools_were_used_early() {
+        // Regression: tools used right after the prefix must not anchor the
+        // split to the start of the conversation. Older history should still
+        // fold once the conversation grows past the tail window.
+        let mut messages = vec![
+            ApiMessage::system("system"),
+            ApiMessage::user("environment"),
+            ApiMessage::user("first question"),
+            tool_calls(),
+            ApiMessage::tool_result("call_1", "fs_read", "content"),
+            ApiMessage::tool_result("call_2", "grep_search", "matches"),
+            ApiMessage::assistant("early answer"),
+        ];
+        for idx in 0..8 {
+            messages.push(ApiMessage::user(format!("later {idx}")));
+        }
+
+        let split =
+            summary_split_index(&messages).expect("history must fold despite early tool use");
+        assert!(split > PREFIX_KEEP);
+        assert_eq!(split, messages.len() - KEEP_TAIL);
     }
 
     #[test]

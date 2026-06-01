@@ -15,5 +15,5 @@
 # Zero means "no enforcement" (check_startup_budget.sh prints a warning and
 # exits 0 in that case), so the script is safe to run ad hoc.
 
-cold_start_p95_ms = 0
-warm_start_p95_ms = 0
+cold_start_budget_ms = 0
+warm_start_budget_ms = 0

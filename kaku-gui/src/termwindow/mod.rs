@@ -1890,7 +1890,26 @@ impl TermWindow {
                     return Ok(true);
                 }
                 self.last_handled_appearance = Some(appearance);
-                config::reload();
+
+                // Coalesce config reloads across all open windows. One system
+                // Light/Dark flip dispatches AppearanceChanged to every
+                // window, but config::reload() reloads from disk and fans its
+                // result out to all windows via subscribers, so a single
+                // reload already refreshes every window. Let only the first
+                // window to observe a given appearance run the reload; the
+                // rest skip the redundant disk load + subscriber fanout and
+                // still repaint from that reload's subscription.
+                use std::sync::atomic::{AtomicU8, Ordering};
+                static LAST_RELOADED_APPEARANCE: AtomicU8 = AtomicU8::new(0);
+                let code = match appearance {
+                    Appearance::Light => 1u8,
+                    Appearance::Dark => 2,
+                    Appearance::LightHighContrast => 3,
+                    Appearance::DarkHighContrast => 4,
+                };
+                if LAST_RELOADED_APPEARANCE.swap(code, Ordering::Relaxed) != code {
+                    config::reload();
+                }
                 Ok(true)
             }
             WindowEvent::PerformKeyAssignment(action) => {
