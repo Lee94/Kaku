@@ -282,6 +282,9 @@ fn capture_pane_content(
     if cap == 0 {
         return None;
     }
+    if pane.is_alt_screen_active() {
+        return None;
+    }
     let dims = pane.get_dimensions();
     let end: wezterm_term::StableRowIndex = dims.physical_top + dims.viewport_rows as isize;
     let start = (end - cap as isize).max(dims.scrollback_top);
@@ -744,21 +747,14 @@ pub fn save_session_snapshot() -> anyhow::Result<()> {
         let _ = std::fs::remove_dir_all(&content_dir);
         return Ok(());
     }
-    let all_trivial = windows.iter().all(|w| {
-        w.tabs.len() <= 1
-            && matches!(
-                &w.tabs.first().map(|t| &t.pane_tree),
-                Some(SavedPaneNode::Leaf(_)) | None
-            )
-    });
-    if windows.len() == 1 && all_trivial {
-        // Single window with one tab containing one leaf pane and no extra
-        // structure — likely the startup empty window. Skip.
+    if windows.len() == 1 {
+        let w = &windows[0];
         let mut leaves = Vec::new();
-        if let Some(t) = windows[0].tabs.first() {
+        if let Some(t) = w.tabs.first() {
             collect_leaf_entries(&t.pane_tree, &mut leaves);
         }
-        if leaves.len() <= 1 {
+        let has_content = leaves.iter().any(|l| l.content_ref.is_some());
+        if w.tabs.len() <= 1 && leaves.len() <= 1 && !has_content {
             let _ = std::fs::remove_dir_all(&content_dir);
             return Ok(());
         }
