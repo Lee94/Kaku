@@ -66,6 +66,9 @@ pub(crate) struct WindowInner {
     pub(crate) dimensions: Dimensions,
     /// Desired cursor shape, re-applied on WM_SETCURSOR over the client area.
     pub(crate) cursor: Option<MouseCursor>,
+    /// True when the system title bar is removed and Kaku draws its own (the GUI
+    /// renders integrated title buttons + tab bar). Drives WM_NCCALCSIZE/NCHITTEST.
+    pub(crate) custom_decorations: bool,
     #[allow(dead_code)]
     pub(crate) window_id: usize,
 }
@@ -142,6 +145,16 @@ impl Window {
     {
         let conn = Connection::get().ok_or_else(|| anyhow!("new_window called without a connection"))?;
 
+        let config = match _config {
+            Some(c) => c.clone(),
+            None => config::configuration(),
+        };
+        // When the user keeps the system TITLE bar we use the normal frame;
+        // otherwise Kaku draws its own title bar (tab bar + integrated buttons)
+        // and we strip the native one via WM_NCCALCSIZE.
+        let custom_decorations =
+            !config.window_decorations.contains(crate::WindowDecorations::TITLE);
+
         let ResolvedGeometry {
             width,
             height,
@@ -201,6 +214,7 @@ impl Window {
                 dpi: conn.default_dpi() as usize,
             },
             cursor: None,
+            custom_decorations,
             window_id,
         }));
         conn.windows.borrow_mut().insert(window_id, inner);
@@ -208,6 +222,12 @@ impl Window {
         // Associate the window id with the HWND so WndProc can route messages.
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, window_id as isize);
+        }
+
+        // Now that WndProc can see custom_decorations, re-run the frame calc to
+        // strip the title bar and keep the DWM shadow.
+        if custom_decorations {
+            apply_custom_decorations(hwnd);
         }
 
         let window = Window { id: window_id };
@@ -239,6 +259,59 @@ fn register_class() {
     });
 }
 
+/// Apply Kaku's custom (title-bar-less) decorations: extend the DWM frame a hair
+/// so the shadow/rounded corners survive, then force a non-client recalc so
+/// WM_NCCALCSIZE strips the title bar.
+fn apply_custom_decorations(hwnd: HWND) {
+    unsafe {
+        let margins = winapi::um::uxtheme::MARGINS {
+            cxLeftWidth: 0,
+            cxRightWidth: 0,
+            cyTopHeight: 1,
+            cyBottomHeight: 0,
+        };
+        winapi::um::dwmapi::DwmExtendFrameIntoClientArea(hwnd, &margins);
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// Resize-border hit-test for a title-bar-less window. Returns an HT* code for
+/// the window edges/corners, or HTCLIENT for the interior (the GUI handles drag
+/// via `request_drag_move` and clicks on tabs/buttons).
+unsafe fn hit_test_nc(hwnd: HWND, screen_x: i32, screen_y: i32) -> isize {
+    let mut rect: RECT = std::mem::zeroed();
+    if GetWindowRect(hwnd, &mut rect) == 0 {
+        return HTCLIENT;
+    }
+    let dpi = GetDpiForWindow(hwnd);
+    let dpi = if dpi == 0 { 96 } else { dpi };
+    // ~8 logical px resize border, scaled for DPI.
+    let border = (8 * dpi as i32) / 96;
+    let left = screen_x < rect.left + border;
+    let right = screen_x >= rect.right - border;
+    let top = screen_y < rect.top + border;
+    let bottom = screen_y >= rect.bottom - border;
+    match (top, bottom, left, right) {
+        (true, _, true, _) => HTTOPLEFT,
+        (true, _, _, true) => HTTOPRIGHT,
+        (_, true, true, _) => HTBOTTOMLEFT,
+        (_, true, _, true) => HTBOTTOMRIGHT,
+        (true, _, _, _) => HTTOP,
+        (_, true, _, _) => HTBOTTOM,
+        (_, _, true, _) => HTLEFT,
+        (_, _, _, true) => HTRIGHT,
+        _ => HTCLIENT,
+    }
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: UINT,
@@ -258,8 +331,36 @@ unsafe extern "system" fn wnd_proc(
     // Clone the sender so we don't hold a borrow across the (possibly reentrant)
     // event dispatch into the GUI callback.
     let events = inner_rc.borrow().events.clone();
+    let custom = inner_rc.borrow().custom_decorations;
 
     match msg {
+        // Custom title bar: strip the native non-client frame so Kaku's own tab
+        // bar / title buttons occupy the top.
+        WM_NCCALCSIZE if custom && wparam != 0 => {
+            let p = lparam as *mut NCCALCSIZE_PARAMS;
+            if IsZoomed(hwnd) != 0 {
+                // Maximized windows would otherwise overflow the monitor; inset
+                // by the frame thickness so we fill the work area.
+                let dpi = GetDpiForWindow(hwnd);
+                let dpi = if dpi == 0 { 96 } else { dpi };
+                let fx = GetSystemMetricsForDpi(SM_CXFRAME, dpi)
+                    + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                let fy = GetSystemMetricsForDpi(SM_CYFRAME, dpi)
+                    + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                (*p).rgrc[0].left += fx;
+                (*p).rgrc[0].right -= fx;
+                (*p).rgrc[0].top += fy;
+                (*p).rgrc[0].bottom -= fy;
+            }
+            // Non-maximized: leave the proposed rect as-is (whole window becomes
+            // client area; resize is handled by WM_NCHITTEST).
+            0
+        }
+        WM_NCHITTEST if custom => {
+            let x = (lparam & 0xffff) as i16 as i32;
+            let y = ((lparam >> 16) & 0xffff) as i16 as i32;
+            hit_test_nc(hwnd, x, y)
+        }
         WM_PAINT => {
             ValidateRect(hwnd, null());
             events.dispatch(WindowEvent::NeedRepaint);
@@ -514,8 +615,10 @@ impl WindowOps for Window {
     }
 
     fn hide(&self) {
+        // The integrated "minimize" title button maps to hide(); minimize to the
+        // taskbar rather than SW_HIDE (which would remove it from the taskbar).
         self.run_on_main_with_hwnd(|hwnd| unsafe {
-            ShowWindow(hwnd, SW_HIDE);
+            ShowWindow(hwnd, SW_MINIMIZE);
         });
     }
 
@@ -528,6 +631,27 @@ impl WindowOps for Window {
     fn focus(&self) {
         self.run_on_main_with_hwnd(|hwnd| unsafe {
             SetForegroundWindow(hwnd);
+        });
+    }
+
+    fn maximize(&self) {
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ShowWindow(hwnd, SW_MAXIMIZE);
+        });
+    }
+
+    fn restore(&self) {
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ShowWindow(hwnd, SW_RESTORE);
+        });
+    }
+
+    fn request_drag_move(&self) {
+        // Hand the in-progress left-button drag to the system move loop. The GUI
+        // calls this while the button is down over a draggable title-bar region.
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ReleaseCapture();
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as WPARAM, 0);
         });
     }
 

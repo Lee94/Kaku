@@ -765,6 +765,12 @@ if package.config:sub(1, 1) == '\\' then
   if config.front_end == nil then
     config.front_end = 'WebGpu'
   end
+  -- Hide the native title bar and let Kaku draw its own (tab bar + integrated
+  -- min/max/close buttons), matching the macOS look. Set this to 'TITLE|RESIZE'
+  -- in your config to get the system title bar back.
+  if config.window_decorations == nil then
+    config.window_decorations = 'RESIZE|INTEGRATED_BUTTONS'
+  end
 end
 
 -- Kaku follows macOS appearance by default. Uncomment one line to force a theme:

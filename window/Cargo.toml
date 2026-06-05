@@ -68,5 +68,8 @@ winapi = { workspace = true, features = [
     "winuser",
     "libloaderapi",
     "winbase",
+    "dwmapi",
+    "uxtheme",
+    "windef",
 ] }
 winreg.workspace = true
