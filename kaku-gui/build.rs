@@ -3,7 +3,6 @@ fn main() {
 
     #[cfg(windows)]
     {
-        use anyhow::Context as _;
         use std::io::Write;
         use std::path::Path;
         let profile = std::env::var("PROFILE").unwrap();
@@ -14,53 +13,48 @@ fn main() {
         let exe_output_dir = repo_dir.join("target").join(profile);
         let windows_dir = repo_dir.join("assets").join("windows");
 
+        // Bundled runtime DLLs are optional for a source build: ConPTY ships
+        // with Windows 10+, and Kaku renders via WebGpu (not ANGLE). Copy them
+        // when the vendored assets are present, but never fail the build if they
+        // are absent — just warn.
+        let copy_if_exists = |src: &Path, dest: &Path| {
+            if dest.exists() {
+                return;
+            }
+            if !src.exists() {
+                println!(
+                    "cargo:warning=optional vendored file missing, skipping: {}",
+                    src.display()
+                );
+                return;
+            }
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(err) = std::fs::copy(src, dest) {
+                println!(
+                    "cargo:warning=failed to copy {} -> {}: {}",
+                    src.display(),
+                    dest.display(),
+                    err
+                );
+            }
+        };
+
         let conhost_dir = windows_dir.join("conhost");
         for name in &["conpty.dll", "OpenConsole.exe"] {
-            let dest_name = exe_output_dir.join(name);
-            let src_name = conhost_dir.join(name);
-
-            if !dest_name.exists() {
-                std::fs::copy(&src_name, &dest_name)
-                    .context(format!(
-                        "copy {} -> {}",
-                        src_name.display(),
-                        dest_name.display()
-                    ))
-                    .unwrap();
-            }
+            copy_if_exists(&conhost_dir.join(name), &exe_output_dir.join(name));
         }
 
         let angle_dir = windows_dir.join("angle");
         for name in &["libEGL.dll", "libGLESv2.dll"] {
-            let dest_name = exe_output_dir.join(name);
-            let src_name = angle_dir.join(name);
-
-            if !dest_name.exists() {
-                std::fs::copy(&src_name, &dest_name)
-                    .context(format!(
-                        "copy {} -> {}",
-                        src_name.display(),
-                        dest_name.display()
-                    ))
-                    .unwrap();
-            }
+            copy_if_exists(&angle_dir.join(name), &exe_output_dir.join(name));
         }
 
-        {
-            let dest_mesa = exe_output_dir.join("mesa");
-            let _ = std::fs::create_dir(&dest_mesa);
-            let dest_name = dest_mesa.join("opengl32.dll");
-            let src_name = windows_dir.join("mesa").join("opengl32.dll");
-            if !dest_name.exists() {
-                std::fs::copy(&src_name, &dest_name)
-                    .context(format!(
-                        "copy {} -> {}",
-                        src_name.display(),
-                        dest_name.display()
-                    ))
-                    .unwrap();
-            }
-        }
+        copy_if_exists(
+            &windows_dir.join("mesa").join("opengl32.dll"),
+            &exe_output_dir.join("mesa").join("opengl32.dll"),
+        );
 
         // If a file named `.tag` is present, we'll take its contents for the
         // version number that we report in wezterm -h.
@@ -94,17 +88,27 @@ fn main() {
             ci_tag
         };
 
+        let win_escaped = windows_dir.display().to_string().replace("\\", "\\\\");
+
+        // The manifest and icon are optional vendored assets. Only reference them
+        // in the resource script when present so a fresh source checkout builds.
+        let mut resource = String::from("#include <winres.h>\n");
+        resource.push_str("// This ID is coupled with code in window/src/os/windows/window.rs\n");
+        resource.push_str("#define IDI_ICON 0x101\n");
+        if windows_dir.join("manifest.manifest").exists() {
+            resource.push_str(&format!("1 RT_MANIFEST \"{win}\\\\manifest.manifest\"\n", win = win_escaped));
+        }
+        if windows_dir.join("terminal.ico").exists() {
+            println!("cargo:rerun-if-changed=../assets/windows/terminal.ico");
+            resource.push_str(&format!("IDI_ICON ICON \"{win}\\\\terminal.ico\"\n", win = win_escaped));
+        }
+
         let rcfile_name = Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("resource.rc");
         let mut rcfile = std::fs::File::create(&rcfile_name).unwrap();
-        println!("cargo:rerun-if-changed=../assets/windows/terminal.ico");
+        rcfile.write_all(resource.as_bytes()).unwrap();
         write!(
             rcfile,
             r#"
-#include <winres.h>
-// This ID is coupled with code in window/src/os/windows/window.rs
-#define IDI_ICON 0x101
-1 RT_MANIFEST "{win}\\manifest.manifest"
-IDI_ICON ICON "{win}\\terminal.ico"
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0
 PRODUCTVERSION  1,0,0,0
@@ -134,7 +138,6 @@ BEGIN
     END
 END
 "#,
-            win = windows_dir.display().to_string().replace("\\", "\\\\"),
             version = version,
         )
         .unwrap();

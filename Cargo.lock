@@ -7199,6 +7199,7 @@ dependencies = [
  "wezterm-font",
  "wezterm-input-types",
  "winapi",
+ "winreg",
 ]
 
 [[package]]

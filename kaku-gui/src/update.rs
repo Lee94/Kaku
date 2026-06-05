@@ -151,21 +151,26 @@ impl StagedUpdateLock {
             .truncate(false)
             .open(&path)
             .map_err(|e| anyhow!("failed to open staging lock {}: {}", path.display(), e))?;
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        // SAFETY: fd is owned by `file` which outlives this call.
-        let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if matches!(err.raw_os_error(), Some(libc::EWOULDBLOCK)) {
-                anyhow::bail!("another Kaku process is already staging an update");
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+            // SAFETY: fd is owned by `file` which outlives this call.
+            let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                if matches!(err.raw_os_error(), Some(libc::EWOULDBLOCK)) {
+                    anyhow::bail!("another Kaku process is already staging an update");
+                }
+                return Err(anyhow!(
+                    "failed to acquire staging lock {}: {}",
+                    path.display(),
+                    err
+                ));
             }
-            return Err(anyhow!(
-                "failed to acquire staging lock {}: {}",
-                path.display(),
-                err
-            ));
         }
+        // TODO(windows): advisory cross-process locking via LockFileEx. For now
+        // the held file handle is a best-effort guard within a single process.
         Ok(Self { _file: file })
     }
 }
@@ -743,6 +748,7 @@ pub fn start_update_checker() {
     {
         // Initialize the notification system early so macOS shows the permission
         // dialog on first launch, rather than lazily when a notification fires.
+        #[cfg(target_os = "macos")]
         wezterm_toast_notification::macos_initialize();
 
         // Register callback so notification clicks trigger the right action:
