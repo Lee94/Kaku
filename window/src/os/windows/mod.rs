@@ -15,17 +15,16 @@
 //! Until Phase 1 lands, the `window` crate does not fully compile for Windows.
 //! Everything here is behind `#[cfg(windows)]`, so the macOS build is unaffected.
 
+pub mod connection;
 pub mod event;
+pub mod window;
 
-// Phase 1 modules (to be restored/ported next). Re-export `Connection` and
-// `Window` from here, the same way `os::macos` does, once they exist:
-//
-// pub mod connection;
-// pub mod window;
+pub use self::connection::*;
+pub use self::window::*;
+
+// Later refinements (Phase 3): native clipboard and keycode/IME translation.
 // pub mod clipboard;
 // pub mod keycodes;
-// pub use self::connection::*;
-// pub use self::window::*;
 
 /// Returns true when the current process is running inside a Remote Desktop
 /// (RDP) session. Used by `configuration.rs` to fall back to software rendering,

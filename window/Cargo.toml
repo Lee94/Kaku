@@ -66,4 +66,7 @@ winapi = { workspace = true, features = [
     "handleapi",
     "synchapi",
     "winuser",
+    "libloaderapi",
+    "winbase",
 ] }
+winreg.workspace = true
