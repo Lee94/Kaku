@@ -15,6 +15,7 @@
 //! Until Phase 1 lands, the `window` crate does not fully compile for Windows.
 //! Everything here is behind `#[cfg(windows)]`, so the macOS build is unaffected.
 
+pub mod clipboard;
 pub mod connection;
 pub mod event;
 pub mod keycodes;
@@ -22,9 +23,6 @@ pub mod window;
 
 pub use self::connection::*;
 pub use self::window::*;
-
-// Later refinement: native clipboard (currently stubbed in window.rs).
-// pub mod clipboard;
 
 /// Returns true when the current process is running inside a Remote Desktop
 /// (RDP) session. Used by `configuration.rs` to fall back to software rendering,

@@ -49,6 +49,26 @@ pub(crate) fn vkey_to_keycode(vk: i32) -> Option<KeyCode> {
     Some(kc)
 }
 
+/// Map a virtual key to its base (unshifted, lowercase) character, for use when
+/// Ctrl/Alt is held so keybindings receive `Char(c)` + modifiers instead of a
+/// cooked control character from WM_CHAR. Returns None for non-character keys.
+pub(crate) fn vkey_to_char(vk: i32) -> Option<char> {
+    match vk {
+        // A-Z -> lowercase so the SHIFT modifier stays explicit.
+        0x41..=0x5A => Some((b'a' + (vk - 0x41) as u8) as char),
+        0x30..=0x39 => Some((b'0' + (vk - 0x30) as u8) as char),
+        _ => {
+            // Punctuation/symbols: ask the active layout for the unshifted char.
+            let ch = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_CHAR) } & 0x7fff;
+            if ch != 0 {
+                char::from_u32(ch).filter(|c| !c.is_control())
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Build the pressed mouse-button set from a message's `wparam` MK_* flags.
 pub(crate) fn mouse_buttons_from_wparam(wparam: usize) -> MouseButtons {
     let mut b = MouseButtons::NONE;

@@ -45,6 +45,13 @@ use winapi::um::winuser::*;
 
 const WINDOW_CLASS_NAME: &str = "KakuWindowClass";
 
+thread_local! {
+    /// When WM_KEYDOWN dispatches a Ctrl/Alt key combo itself, the message loop's
+    /// TranslateMessage still posts a (cooked, modifier-less) WM_CHAR for it.
+    /// This flag tells the next WM_CHAR to swallow that duplicate.
+    static SWALLOW_NEXT_CHAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Encode a Rust string as a NUL-terminated wide (UTF-16) string for win32 APIs.
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -57,8 +64,23 @@ pub(crate) struct WindowInner {
     pub(crate) hwnd: HWND,
     pub(crate) events: WindowEventSender,
     pub(crate) dimensions: Dimensions,
+    /// Desired cursor shape, re-applied on WM_SETCURSOR over the client area.
+    pub(crate) cursor: Option<MouseCursor>,
     #[allow(dead_code)]
     pub(crate) window_id: usize,
+}
+
+/// Map our platform-independent cursor to a win32 system cursor handle.
+fn cursor_to_hcursor(cursor: Option<MouseCursor>) -> winapi::shared::windef::HCURSOR {
+    let name = match cursor {
+        Some(MouseCursor::Text) => IDC_IBEAM,
+        Some(MouseCursor::Hand) => IDC_HAND,
+        Some(MouseCursor::SizeUpDown) => IDC_SIZENS,
+        Some(MouseCursor::SizeLeftRight) => IDC_SIZEWE,
+        Some(MouseCursor::Grabbing) => IDC_SIZEALL,
+        Some(MouseCursor::Arrow) | None => IDC_ARROW,
+    };
+    unsafe { LoadCursorW(null_mut(), name) }
 }
 
 /// Public, cheaply-cloneable handle to a window, addressed by id (mirrors the
@@ -178,6 +200,7 @@ impl Window {
                 pixel_height: height,
                 dpi: conn.default_dpi() as usize,
             },
+            cursor: None,
             window_id,
         }));
         conn.windows.borrow_mut().insert(window_id, inner);
@@ -260,6 +283,16 @@ unsafe extern "system" fn wnd_proc(
             });
             0
         }
+        WM_SETCURSOR => {
+            // Re-apply our desired cursor when the mouse is over the client
+            // area; otherwise let the default proc handle borders/buttons.
+            if (lparam & 0xffff) == HTCLIENT {
+                let cursor = inner_rc.borrow().cursor;
+                SetCursor(cursor_to_hcursor(cursor));
+                return 1; // TRUE: handled
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_SETFOCUS => {
             events.dispatch(WindowEvent::FocusChanged(true));
             0
@@ -269,9 +302,14 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_CHAR => {
-            // WM_CHAR delivers the layout-translated character, including control
-            // chars for Ctrl combos (e.g. Ctrl+C -> 0x03). The modifiers are
-            // already baked into the char, so report NONE here.
+            // Swallow the duplicate WM_CHAR that TranslateMessage posts for a
+            // Ctrl/Alt combo we already dispatched from WM_KEYDOWN.
+            if SWALLOW_NEXT_CHAR.with(|s| s.replace(false)) {
+                return 0;
+            }
+            // WM_CHAR delivers the layout-translated character for plain text
+            // (including IME/dead-key composition). Modifiers are baked into the
+            // char already, so report NONE here.
             if let Some(c) = char::from_u32(wparam as u32) {
                 if c != '\0' {
                     events.dispatch(WindowEvent::KeyEvent(KeyEvent {
@@ -288,19 +326,40 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_KEYDOWN => {
-            // Navigation/function keys don't produce WM_CHAR; translate them
-            // here. Text keys fall through to DefWindowProc -> WM_CHAR.
-            if let Some(key) = keycodes::vkey_to_keycode(wparam as i32) {
+            let vk = wparam as i32;
+            let mods = keycodes::current_modifiers();
+            let repeat = (lparam & 0xffff) as u16;
+            // Navigation/function keys don't produce WM_CHAR; translate them here.
+            if let Some(key) = keycodes::vkey_to_keycode(vk) {
                 events.dispatch(WindowEvent::KeyEvent(KeyEvent {
                     key,
-                    modifiers: keycodes::current_modifiers(),
+                    modifiers: mods,
                     leds: KeyboardLedStatus::empty(),
-                    repeat_count: (lparam & 0xffff) as u16,
+                    repeat_count: repeat,
                     key_is_down: true,
                     raw: None,
                     win32_uni_char: None,
                 }));
                 return 0;
+            }
+            // Ctrl/Alt + key must reach keybindings (paste, new tab, ...) with
+            // modifiers intact; WM_CHAR would deliver a cooked control char with
+            // no modifiers. Dispatch it here and swallow the duplicate WM_CHAR.
+            // Plain keys fall through to WM_CHAR for layout/IME handling.
+            if mods.intersects(Modifiers::CTRL | Modifiers::ALT) {
+                if let Some(c) = keycodes::vkey_to_char(vk) {
+                    events.dispatch(WindowEvent::KeyEvent(KeyEvent {
+                        key: KeyCode::Char(c),
+                        modifiers: mods,
+                        leds: KeyboardLedStatus::empty(),
+                        repeat_count: repeat,
+                        key_is_down: true,
+                        raw: None,
+                        win32_uni_char: None,
+                    }));
+                    SWALLOW_NEXT_CHAR.with(|s| s.set(true));
+                    return 0;
+                }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -446,8 +505,14 @@ impl WindowOps for Window {
         });
     }
 
-    fn set_cursor(&self, _cursor: Option<MouseCursor>) {
-        // TODO(windows): translate MouseCursor -> LoadCursorW and SetCursor.
+    fn set_cursor(&self, cursor: Option<MouseCursor>) {
+        Connection::with_window_inner(self.id, move |inner| {
+            inner.cursor = cursor;
+            unsafe {
+                SetCursor(cursor_to_hcursor(cursor));
+            }
+            Ok(())
+        });
     }
 
     fn invalidate(&self) {
@@ -487,16 +552,15 @@ impl WindowOps for Window {
     }
 
     fn get_clipboard(&self, _clipboard: Clipboard) -> Future<String> {
-        // TODO(windows): read CF_UNICODETEXT from the native clipboard.
-        Future::ok(String::new())
+        Future::ok(super::clipboard::get_clipboard_text())
     }
 
     fn get_clipboard_data(&self, _clipboard: Clipboard) -> Future<ClipboardData> {
-        Future::ok(ClipboardData::Text(String::new()))
+        Future::ok(ClipboardData::Text(super::clipboard::get_clipboard_text()))
     }
 
-    fn set_clipboard(&self, _clipboard: Clipboard, _text: String) {
-        // TODO(windows): write CF_UNICODETEXT to the native clipboard.
+    fn set_clipboard(&self, _clipboard: Clipboard, text: String) {
+        super::clipboard::set_clipboard_text(&text);
     }
 }
 
