@@ -1,21 +1,25 @@
-use crate::ToastNotification;
+//! Windows toast notifications via WinRT (`winrt-notification`).
+//!
+//! Click-to-open-url actions are not yet wired (that needs COM activation
+//! registration); for now the toast shows the title and message, attributed to
+//! Kaku's AppUserModelID. Real activation handling is a later enhancement.
 
-/// Minimal Windows notification backend.
-///
-/// TODO(windows port, Phase 6): replace with native WinRT toast notifications
-/// (`ToastNotificationManager`), including the click-to-open-url action that
-/// resolves the bundled executable relative to the running app (mirroring the
-/// macOS backend). For now we log the notification so it is observable rather
-/// than silently dropped, which is enough to bring the GUI up on Windows.
+use crate::ToastNotification;
+use winrt_notification::{Duration as ToastDuration, Toast};
+
+/// Must match the AppUserModelID set in kaku-gui via
+/// `SetCurrentProcessExplicitAppUserModelID` so toasts are attributed to Kaku.
+const APP_ID: &str = "sh.kaku.Kaku";
+
 pub fn show_notif(toast: ToastNotification) -> Result<(), Box<dyn std::error::Error>> {
-    match &toast.url {
-        Some(url) => log::info!(
-            "notification: {} - {} ({})",
-            toast.title,
-            toast.message,
-            url
-        ),
-        None => log::info!("notification: {} - {}", toast.title, toast.message),
-    }
+    let duration = match toast.timeout {
+        Some(d) if d.as_secs() >= 9 => ToastDuration::Long,
+        _ => ToastDuration::Short,
+    };
+    Toast::new(APP_ID)
+        .title(&toast.title)
+        .text1(&toast.message)
+        .duration(duration)
+        .show()?;
     Ok(())
 }

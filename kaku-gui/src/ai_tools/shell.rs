@@ -132,19 +132,38 @@ pub(super) fn exec_shell_exec(
     cwd_tmp_opts
         .open(&cwd_tmp_path)
         .with_context(|| format!("could not create temp cwd file {}", cwd_tmp_path.display()))?;
-    let wrapped = format!(
-        "{}; __kaku_rc=$?; printf '%s' \"$(pwd)\" > {}; exit $__kaku_rc",
-        command,
-        cwd_tmp_path.display()
-    );
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     let streaming_cap = cap.saturating_sub(512);
 
-    let mut cmd = std::process::Command::new(&shell);
-    cmd.arg("-l")
-        .arg("-c")
-        .arg(&wrapped)
-        .current_dir(&exec_cwd)
+    // Build the shell invocation: run the command, capture the resulting working
+    // directory into cwd_tmp_path, then exit with the command's own status.
+    #[cfg(unix)]
+    let (shell, mut cmd) = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        let wrapped = format!(
+            "{}; __kaku_rc=$?; printf '%s' \"$(pwd)\" > {}; exit $__kaku_rc",
+            command,
+            cwd_tmp_path.display()
+        );
+        let mut cmd = std::process::Command::new(&shell);
+        cmd.arg("-l").arg("-c").arg(wrapped);
+        (shell, cmd)
+    };
+    #[cfg(windows)]
+    let (shell, mut cmd) = {
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        // `cd` with no args prints the cwd; delayed expansion (/V:ON) preserves
+        // the command's exit code across the capture.
+        let wrapped = format!(
+            "{} & set __kaku_rc=!ERRORLEVEL! & cd > \"{}\" & exit /b !__kaku_rc!",
+            command,
+            cwd_tmp_path.display()
+        );
+        let mut cmd = std::process::Command::new(&shell);
+        cmd.arg("/V:ON").arg("/C").arg(wrapped);
+        (shell, cmd)
+    };
+
+    cmd.current_dir(&exec_cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     set_process_group(&mut cmd);
@@ -262,12 +281,21 @@ pub(super) fn exec_shell_bg(args: &serde_json::Value, cwd: &mut String) -> Resul
         .map(|p| resolve(p, cwd))
         .transpose()?
         .unwrap_or_else(|| PathBuf::from(cwd.as_str()));
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    let mut cmd = std::process::Command::new(&shell);
-    cmd.arg("-l")
-        .arg("-c")
-        .arg(command)
-        .current_dir(&exec_cwd)
+    #[cfg(unix)]
+    let mut cmd = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        let mut cmd = std::process::Command::new(shell);
+        cmd.arg("-l").arg("-c").arg(command);
+        cmd
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        let mut cmd = std::process::Command::new(shell);
+        cmd.arg("/C").arg(command);
+        cmd
+    };
+    cmd.current_dir(&exec_cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     set_process_group(&mut cmd);

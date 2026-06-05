@@ -2724,6 +2724,13 @@ pub(crate) fn compute_runtime_dir() -> anyhow::Result<PathBuf> {
         return Ok(runtime.join("kaku"));
     }
 
+    // Windows has no XDG runtime dir; keep runtime/log state under LocalAppData
+    // (%LOCALAPPDATA%\kaku) instead of a Unix-style ~/.local/share path.
+    #[cfg(windows)]
+    if let Some(local) = dirs_next::cache_dir() {
+        return Ok(local.join("kaku"));
+    }
+
     Ok(crate::HOME_DIR.join(".local/share/kaku"))
 }
 
