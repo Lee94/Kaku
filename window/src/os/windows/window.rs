@@ -14,10 +14,12 @@
 
 #![allow(clippy::let_unit_value)]
 
+use super::keycodes;
 use crate::connection::ConnectionOps;
 use crate::{
-    Clipboard, ClipboardData, Connection, Dimensions, MouseCursor, RequestedWindowGeometry,
-    ResolvedGeometry, WindowEvent, WindowEventSender, WindowOps, WindowState,
+    Clipboard, ClipboardData, Connection, Dimensions, KeyCode, KeyEvent, KeyboardLedStatus,
+    Modifiers, MouseCursor, MouseEvent, MouseEventKind, MousePress, Point, RequestedWindowGeometry,
+    ResolvedGeometry, ScreenPoint, WindowEvent, WindowEventSender, WindowOps, WindowState,
 };
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
@@ -242,6 +244,107 @@ unsafe extern "system" fn wnd_proc(
             events.dispatch(WindowEvent::FocusChanged(false));
             0
         }
+        WM_CHAR => {
+            // WM_CHAR delivers the layout-translated character, including control
+            // chars for Ctrl combos (e.g. Ctrl+C -> 0x03). The modifiers are
+            // already baked into the char, so report NONE here.
+            if let Some(c) = char::from_u32(wparam as u32) {
+                if c != '\0' {
+                    events.dispatch(WindowEvent::KeyEvent(KeyEvent {
+                        key: KeyCode::Char(c),
+                        modifiers: Modifiers::NONE,
+                        leds: KeyboardLedStatus::empty(),
+                        repeat_count: 1,
+                        key_is_down: true,
+                        raw: None,
+                        win32_uni_char: Some(c),
+                    }));
+                }
+            }
+            0
+        }
+        WM_KEYDOWN => {
+            // Navigation/function keys don't produce WM_CHAR; translate them
+            // here. Text keys fall through to DefWindowProc -> WM_CHAR.
+            if let Some(key) = keycodes::vkey_to_keycode(wparam as i32) {
+                events.dispatch(WindowEvent::KeyEvent(KeyEvent {
+                    key,
+                    modifiers: keycodes::current_modifiers(),
+                    leds: KeyboardLedStatus::empty(),
+                    repeat_count: (lparam & 0xffff) as u16,
+                    key_is_down: true,
+                    raw: None,
+                    win32_uni_char: None,
+                }));
+                return 0;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_MOUSEMOVE => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Move,
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_LBUTTONDOWN => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Press(MousePress::Left),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_LBUTTONUP => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Release(MousePress::Left),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_RBUTTONDOWN => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Press(MousePress::Right),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_RBUTTONUP => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Release(MousePress::Right),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_MBUTTONDOWN => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Press(MousePress::Middle),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_MBUTTONUP => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Release(MousePress::Middle),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam >> 16) & 0xffff) as i16;
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::VertWheel(delta / 120),
+                wparam,
+                lparam,
+            )));
+            0
+        }
         WM_CLOSE => {
             events.dispatch(WindowEvent::CloseRequested);
             0
@@ -252,6 +355,24 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// Build a `MouseEvent` from a mouse message's `wparam`/`lparam`.
+///
+/// Note: for `WM_MOUSEWHEEL`, `lparam` holds screen (not client) coordinates;
+/// that is a minor inaccuracy for hit-testing the wheel target and can be
+/// refined with `ScreenToClient` later.
+fn make_mouse(kind: MouseEventKind, wparam: WPARAM, lparam: LPARAM) -> MouseEvent {
+    let x = (lparam & 0xffff) as i16 as isize;
+    let y = ((lparam >> 16) & 0xffff) as i16 as isize;
+    MouseEvent {
+        kind,
+        coords: Point::new(x, y),
+        screen_coords: ScreenPoint::new(x, y),
+        mouse_buttons: keycodes::mouse_buttons_from_wparam(wparam),
+        modifiers: keycodes::current_modifiers(),
+        platform_click_count: 0,
     }
 }
 

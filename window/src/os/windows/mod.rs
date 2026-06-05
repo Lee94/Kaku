@@ -17,14 +17,14 @@
 
 pub mod connection;
 pub mod event;
+pub mod keycodes;
 pub mod window;
 
 pub use self::connection::*;
 pub use self::window::*;
 
-// Later refinements (Phase 3): native clipboard and keycode/IME translation.
+// Later refinement: native clipboard (currently stubbed in window.rs).
 // pub mod clipboard;
-// pub mod keycodes;
 
 /// Returns true when the current process is running inside a Remote Desktop
 /// (RDP) session. Used by `configuration.rs` to fall back to software rendering,
