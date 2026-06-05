@@ -69,6 +69,50 @@ pub(crate) fn vkey_to_char(vk: i32) -> Option<char> {
     }
 }
 
+/// Map a `KeyCode` to a Win32 virtual key, for RegisterHotKey. Covers the keys a
+/// global hotkey would realistically use (letters, digits, function, navigation).
+pub(crate) fn keycode_to_vk(key: &KeyCode) -> Option<u32> {
+    Some(match key {
+        KeyCode::Char(c) => {
+            let u = c.to_ascii_uppercase();
+            if u.is_ascii_alphanumeric() {
+                u as u32
+            } else {
+                return None;
+            }
+        }
+        KeyCode::Function(n) if *n >= 1 && *n <= 24 => VK_F1 as u32 + (*n as u32 - 1),
+        KeyCode::LeftArrow => VK_LEFT as u32,
+        KeyCode::RightArrow => VK_RIGHT as u32,
+        KeyCode::UpArrow => VK_UP as u32,
+        KeyCode::DownArrow => VK_DOWN as u32,
+        KeyCode::Home => VK_HOME as u32,
+        KeyCode::End => VK_END as u32,
+        KeyCode::PageUp => VK_PRIOR as u32,
+        KeyCode::PageDown => VK_NEXT as u32,
+        KeyCode::Insert => VK_INSERT as u32,
+        _ => return None,
+    })
+}
+
+/// Translate our modifiers to the RegisterHotKey MOD_* flags.
+pub(crate) fn mods_to_win32(mods: Modifiers) -> u32 {
+    let mut m = 0u32;
+    if mods.contains(Modifiers::ALT) {
+        m |= MOD_ALT as u32;
+    }
+    if mods.contains(Modifiers::CTRL) {
+        m |= MOD_CONTROL as u32;
+    }
+    if mods.contains(Modifiers::SHIFT) {
+        m |= MOD_SHIFT as u32;
+    }
+    if mods.contains(Modifiers::SUPER) {
+        m |= MOD_WIN as u32;
+    }
+    m
+}
+
 /// Build the pressed mouse-button set from a message's `wparam` MK_* flags.
 pub(crate) fn mouse_buttons_from_wparam(wparam: usize) -> MouseButtons {
     let mut b = MouseButtons::NONE;

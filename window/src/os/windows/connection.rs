@@ -71,6 +71,23 @@ impl Connection {
         .detach();
         future
     }
+
+    /// Toggle the first window's visibility, used by the global hotkey: hide it
+    /// when it is the foreground window, otherwise show and focus it.
+    fn toggle_main_window(&self) {
+        let windows: Vec<_> = self.windows.borrow().values().cloned().collect();
+        if let Some(inner) = windows.first() {
+            let hwnd = inner.borrow().hwnd;
+            unsafe {
+                if IsWindowVisible(hwnd) != 0 && GetForegroundWindow() == hwnd {
+                    ShowWindow(hwnd, SW_HIDE);
+                } else {
+                    ShowWindow(hwnd, SW_SHOW);
+                    SetForegroundWindow(hwnd);
+                }
+            }
+        }
+    }
 }
 
 /// The real system DPI (e.g. 192 at 200% scale), or DEFAULT_DPI if unavailable.
@@ -114,6 +131,12 @@ impl ConnectionOps for Connection {
                         self.windows.borrow_mut().clear();
                         return Ok(());
                     }
+                    // RegisterHotKey delivers WM_HOTKEY to the thread queue with a
+                    // null hwnd, so it isn't routed to any WndProc; handle it here.
+                    if msg.message == WM_HOTKEY {
+                        self.toggle_main_window();
+                        continue;
+                    }
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -145,6 +168,29 @@ impl ConnectionOps for Connection {
     fn beep(&self) {
         unsafe {
             MessageBeep(0xFFFF_FFFF);
+        }
+    }
+
+    fn sync_global_hotkey(&self) {
+        unsafe {
+            UnregisterHotKey(std::ptr::null_mut(), GLOBAL_HOTKEY_ID);
+        }
+        if let Some((vk, mods)) = configured_global_hotkey() {
+            let ok = unsafe {
+                RegisterHotKey(
+                    std::ptr::null_mut(),
+                    GLOBAL_HOTKEY_ID,
+                    mods | MOD_NOREPEAT as u32,
+                    vk,
+                )
+            };
+            if ok == 0 {
+                log::warn!(
+                    "RegisterHotKey failed for the global hotkey (vk={vk}, mods={mods:#x}); \
+                     it may be reserved by the system. Set config.macos_global_hotkey to a \
+                     free combo such as {{ key = 'K', mods = 'CTRL|ALT' }}."
+                );
+            }
         }
     }
 
@@ -189,4 +235,21 @@ fn read_apps_use_light_theme() -> Option<bool> {
         .ok()?;
     let value: u32 = key.get_value("AppsUseLightTheme").ok()?;
     Some(value != 0)
+}
+
+const GLOBAL_HOTKEY_ID: i32 = 1;
+
+/// Resolve the configured global hotkey to (virtual key, MOD_* flags), or None.
+/// Reuses the `macos_global_hotkey` config field (the only global-hotkey setting
+/// today); a modifier is required so we never bind a bare key globally.
+fn configured_global_hotkey() -> Option<(u32, u32)> {
+    let config = config::configuration();
+    let hotkey = config.macos_global_hotkey.clone()?;
+    let key = hotkey.key.resolve(config.key_map_preference);
+    let vk = super::keycodes::keycode_to_vk(&key)?;
+    let mods = super::keycodes::mods_to_win32(hotkey.mods.remove_positional_mods());
+    if mods == 0 {
+        return None;
+    }
+    Some((vk, mods))
 }
