@@ -39,6 +39,10 @@ impl Connection {
         self.windows.borrow().get(&window_id).map(Rc::clone)
     }
 
+    // Retained to mirror the macOS backend; window ops currently copy the HWND
+    // out under a brief borrow instead (see window.rs) to avoid re-entrant
+    // RefCell borrows when win32 calls synchronously dispatch messages.
+    #[allow(dead_code)]
     pub(crate) fn with_window_inner<
         R,
         F: FnOnce(&mut WindowInner) -> anyhow::Result<R> + Send + 'static,

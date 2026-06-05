@@ -76,11 +76,35 @@ impl Window {
 }
 
 impl Window {
+    /// Copy the HWND out of the window-inner with only a brief borrow. Callers
+    /// must NOT hold a `WindowInner` borrow while invoking win32 functions like
+    /// `ShowWindow`/`SetWindowPos`/`DestroyWindow`, because those synchronously
+    /// re-enter the WndProc which borrows the same cell.
     fn hwnd(&self) -> Option<HWND> {
         let conn = Connection::get()?;
         let inner = conn.window_by_id(self.id)?;
         let hwnd = inner.borrow().hwnd;
         Some(hwnd)
+    }
+
+    /// Run `f(hwnd)` on the GUI thread. `WindowOps` methods may be called from
+    /// any thread (e.g. the PTY reader thread calling `invalidate`), but the
+    /// thread-local `Connection` and win32 window operations only work on the
+    /// GUI thread, so we hop there via the spawn queue. The HWND is read under a
+    /// brief borrow and the borrow is released before `f` runs, so win32 calls
+    /// that synchronously re-enter the WndProc (e.g. `SetWindowPos`) don't find
+    /// the `WindowInner` already borrowed.
+    fn run_on_main_with_hwnd<F: FnOnce(HWND) + Send + 'static>(&self, f: F) {
+        let id = self.id;
+        promise::spawn::spawn_into_main_thread(async move {
+            if let Some(conn) = Connection::get() {
+                if let Some(inner) = conn.window_by_id(id) {
+                    let hwnd = inner.borrow().hwnd;
+                    f(hwnd);
+                }
+            }
+        })
+        .detach();
     }
 
     pub async fn new_window<F>(
@@ -386,47 +410,39 @@ impl WindowOps for Window {
     where
         Self: Sized,
     {
-        Connection::with_window_inner(self.id, move |inner| {
-            inner
-                .events
-                .dispatch(WindowEvent::Notification(Box::new(t)));
-            Ok(())
-        });
+        let id = self.id;
+        promise::spawn::spawn_into_main_thread(async move {
+            if let Some(conn) = Connection::get() {
+                if let Some(inner) = conn.window_by_id(id) {
+                    let events = inner.borrow().events.clone();
+                    events.dispatch(WindowEvent::Notification(Box::new(t)));
+                }
+            }
+        })
+        .detach();
     }
 
     fn show(&self) {
-        Connection::with_window_inner(self.id, |inner| {
-            unsafe {
-                ShowWindow(inner.hwnd, SW_SHOW);
-            }
-            Ok(())
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ShowWindow(hwnd, SW_SHOW);
         });
     }
 
     fn hide(&self) {
-        Connection::with_window_inner(self.id, |inner| {
-            unsafe {
-                ShowWindow(inner.hwnd, SW_HIDE);
-            }
-            Ok(())
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ShowWindow(hwnd, SW_HIDE);
         });
     }
 
     fn close(&self) {
-        Connection::with_window_inner(self.id, |inner| {
-            unsafe {
-                DestroyWindow(inner.hwnd);
-            }
-            Ok(())
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            DestroyWindow(hwnd);
         });
     }
 
     fn focus(&self) {
-        Connection::with_window_inner(self.id, |inner| {
-            unsafe {
-                SetForegroundWindow(inner.hwnd);
-            }
-            Ok(())
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            SetForegroundWindow(hwnd);
         });
     }
 
@@ -435,27 +451,20 @@ impl WindowOps for Window {
     }
 
     fn invalidate(&self) {
-        Connection::with_window_inner(self.id, |inner| {
-            unsafe {
-                InvalidateRect(inner.hwnd, null(), 0);
-            }
-            Ok(())
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            InvalidateRect(hwnd, null(), 0);
         });
     }
 
     fn set_title(&self, title: &str) {
-        let title = title.to_owned();
-        Connection::with_window_inner(self.id, move |inner| {
-            let wide_title = wide(&title);
-            unsafe {
-                SetWindowTextW(inner.hwnd, wide_title.as_ptr());
-            }
-            Ok(())
+        let wide_title = wide(title);
+        self.run_on_main_with_hwnd(move |hwnd| unsafe {
+            SetWindowTextW(hwnd, wide_title.as_ptr());
         });
     }
 
     fn set_inner_size(&self, width: usize, height: usize) {
-        Connection::with_window_inner(self.id, move |inner| {
+        self.run_on_main_with_hwnd(move |hwnd| {
             let mut rect = RECT {
                 left: 0,
                 top: 0,
@@ -465,7 +474,7 @@ impl WindowOps for Window {
             unsafe {
                 AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, 0);
                 SetWindowPos(
-                    inner.hwnd,
+                    hwnd,
                     null_mut(),
                     0,
                     0,
@@ -474,7 +483,6 @@ impl WindowOps for Window {
                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
-            Ok(())
         });
     }
 

@@ -712,6 +712,13 @@ local function resolve_bundled_config()
     return bundled
   end
 
+  -- The remaining locations follow the macOS .app bundle layout. On other
+  -- platforms (e.g. Windows) skip them so we don't load macOS-only defaults
+  -- such as a zsh `default_prog` or AppKit-specific startup Lua.
+  if package.config:sub(1, 1) == '\\' then
+    return nil
+  end
+
   local dev_bundled = wezterm.executable_dir .. '/../../assets/macos/Kaku.app/Contents/Resources/kaku.lua'
   f = io.open(dev_bundled, 'r')
   if f then
@@ -749,6 +756,15 @@ if bundled then
   end
 else
   wezterm.log_error('Kaku: bundled defaults not found')
+end
+
+-- Windows does not ship a bundled config yet. Ensure a working baseline: the
+-- WebGpu/DX12 renderer (the default OpenGL front_end is not available on the
+-- Windows backend) and the system default shell (cmd.exe via %ComSpec%).
+if package.config:sub(1, 1) == '\\' then
+  if config.front_end == nil then
+    config.front_end = 'WebGpu'
+  end
 end
 
 -- Kaku follows macOS appearance by default. Uncomment one line to force a theme:
