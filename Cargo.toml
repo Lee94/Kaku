@@ -301,8 +301,10 @@ wezterm-term = { path = "term" }
 wezterm-toast-notification = { path = "crates/wezterm-toast-notification" }
 wezterm-uds = { path = "crates/wezterm-uds" }
 wezterm-version = { path = "crates/wezterm-version" }
-# macOS-only: only compile Metal backend (removes Vulkan, DX12, GL)
-wgpu = { version = "25.0.2", default-features = false, features = ["metal", "wgsl"] }
+# Only the shared wgsl shader frontend is enabled here. The native GPU backend
+# (metal on macOS, dx12 on Windows) is selected per-target in the consuming
+# crate (kaku-gui) so each OS links only its platform backend.
+wgpu = { version = "25.0.2", default-features = false, features = ["wgsl"] }
 whoami = "1.5"
 winapi = "0.3.9"
 window = {path="window"}

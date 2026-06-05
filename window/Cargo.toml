@@ -57,3 +57,13 @@ objc.workspace = true
 objc2-core-graphics.workspace = true
 plist.workspace = true
 shlex.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Windows backend (window/src/os/windows). Feature set grows as the backend is
+# ported; keep it limited to APIs actually referenced so unused-import lints stay
+# meaningful.
+winapi = { workspace = true, features = [
+    "handleapi",
+    "synchapi",
+    "winuser",
+] }
