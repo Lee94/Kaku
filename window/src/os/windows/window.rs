@@ -268,7 +268,14 @@ unsafe extern "system" fn wnd_proc(
         WM_SIZE => {
             let width = (lparam & 0xffff) as usize;
             let height = ((lparam >> 16) & 0xffff) as usize;
-            let dpi = crate::DEFAULT_DPI as usize;
+            let dpi = {
+                let d = GetDpiForWindow(hwnd);
+                if d == 0 {
+                    crate::DEFAULT_DPI as usize
+                } else {
+                    d as usize
+                }
+            };
             let dimensions = Dimensions {
                 pixel_width: width,
                 pixel_height: height,
@@ -281,6 +288,25 @@ unsafe extern "system" fn wnd_proc(
                 live_resizing: wparam == SIZE_RESTORED as WPARAM,
                 screen_changed: false,
             });
+            0
+        }
+        WM_DPICHANGED => {
+            // Moved to a monitor with a different scale. Windows passes the
+            // suggested new window rect in lparam; honor it, which triggers a
+            // WM_SIZE that re-reads GetDpiForWindow and re-lays-out the grid.
+            let suggested = lparam as *const RECT;
+            if !suggested.is_null() {
+                let r = &*suggested;
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
             0
         }
         WM_SETCURSOR => {

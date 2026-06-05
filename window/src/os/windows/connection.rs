@@ -73,9 +73,25 @@ impl Connection {
     }
 }
 
+/// The real system DPI (e.g. 192 at 200% scale), or DEFAULT_DPI if unavailable.
+/// The process is per-monitor DPI aware (manifest), so reporting the true DPI is
+/// what makes the GUI render fonts at the correct, crisp scale on HiDPI displays.
+pub(crate) fn system_dpi() -> f64 {
+    let dpi = unsafe { GetDpiForSystem() };
+    if dpi == 0 {
+        crate::DEFAULT_DPI
+    } else {
+        dpi as f64
+    }
+}
+
 impl ConnectionOps for Connection {
     fn name(&self) -> String {
         "Windows".to_string()
+    }
+
+    fn default_dpi(&self) -> f64 {
+        system_dpi()
     }
 
     fn terminate_message_loop(&self) {
@@ -142,12 +158,13 @@ impl ConnectionOps for Connection {
             )
         };
         let rect = euclid::rect(0, 0, w, h);
+        let dpi = system_dpi();
         let info = ScreenInfo {
             name: "primary".to_string(),
             rect,
-            scale: 1.0,
+            scale: dpi / crate::DEFAULT_DPI,
             max_fps: None,
-            effective_dpi: Some(crate::DEFAULT_DPI),
+            effective_dpi: Some(dpi),
         };
         let mut by_name = HashMap::new();
         by_name.insert(info.name.clone(), info.clone());
