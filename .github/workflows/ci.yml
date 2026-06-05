@@ -88,7 +88,7 @@ jobs:
           toolchain: 1.93.0
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@f092c064826410a38929a5791d2c0225b94432fe # nextest
@@ -141,7 +141,7 @@ jobs:
           toolchain: 1.93.0
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Guard silent write flush ok
         run: |
@@ -173,7 +173,7 @@ jobs:
           toolchain: 1.93.0
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/kaku-relay
 
@@ -201,7 +201,7 @@ jobs:
           components: clippy
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       # Only the crates that opt in via `[lints] workspace = true` in their
       # own Cargo.toml are scoped here. Other crates (vendored, wezterm
@@ -249,7 +249,7 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build both targets
         run: |
@@ -287,7 +287,7 @@ jobs:
           toolchain: 1.93.0
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build debug app bundle
         run: |
