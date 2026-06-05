@@ -742,7 +742,15 @@ fn show_update_notification(tag: &str) {
 }
 
 pub fn start_update_checker() {
+    // The auto-updater targets the macOS .app bundle (curl/ditto/PlistBuddy and
+    // an in-place bundle swap) and does not apply to Windows. Skip it there so
+    // we don't spawn /usr/bin/curl and spam errors on startup.
+    #[cfg(not(target_os = "macos"))]
+    return;
+
+    #[cfg(target_os = "macos")]
     static CHECKER_STARTED: AtomicBool = AtomicBool::new(false);
+    #[cfg(target_os = "macos")]
     if let Ok(false) =
         CHECKER_STARTED.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
     {

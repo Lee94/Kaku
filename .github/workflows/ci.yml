@@ -300,3 +300,24 @@ jobs:
           test "$(cat dist/Kaku.app/Contents/Resources/vendor/zsh-autosuggestions/.kaku-vendor-ref)" = "85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5"
           test "$(cat dist/Kaku.app/Contents/Resources/vendor/fast-syntax-highlighting/.kaku-vendor-ref)" = "3d574ccf48804b10dca52625df13da5edae7f553"
           test "$(cat dist/Kaku.app/Contents/Resources/vendor/zsh-completions/.kaku-vendor-ref)" = "84615f3d0b0e943d5b1de862c9552e572c8e70bb"
+
+  # Windows port build gate. GitHub windows-latest runners ship Strawberry Perl
+  # (needed to build vendored OpenSSL) and the MSVC toolchain, so a stock
+  # `cargo build` works. This keeps the cross-platform backend compiling.
+  windows-build:
+    name: Windows Build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: 1.93.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+
+      - name: Build (kaku, kaku-gui, mux-server)
+        run: cargo build --locked -p kaku -p kaku-gui -p wezterm-mux-server-impl
