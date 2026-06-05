@@ -20,6 +20,8 @@
 10. **Font Scaling**: Prompt redraws are skipped while the font scale is settling, and PTY resizes flush only after the cell dimensions stabilize.
 11. **`kaku chat` Overlay**: Every invocation reliably retriggers the AI chat overlay, even when the user-var value would otherwise be deduped.
 12. **Tidy**: Simplified Chinese localization is removed (the `language` option is still accepted as a deprecated field), `smart_tab_mode` is added, zsh managed-comment highlight is brighter in dark themes, dependencies are audit-clean, and new CI gates cover logs, clippy, and prompt metadata.
+13. **Codex Backend**: Kaku Assistant can use your existing `codex` (ChatGPT) login as a backend through the Responses API, with no separate API key. Opt in by setting Auth Type to `codex` in `kaku ai` and picking a Codex model such as `gpt-5-codex`.
+14. **AI Chat Rendering**: The chat overlay now repaints from its own output, so streamed replies and the loading indicator update in real time instead of waiting for a click, and every chat loader shares one sparkle spinner.
 
 ### 更新日志
 
@@ -35,5 +37,7 @@
 10. **字体缩放**：缩放未稳定前跳过 prompt 重绘，PTY 大小调整在 cell 维度稳定后才一次性下发。
 11. **`kaku chat` 浮层**：每次调用都能稳定触发 AI 聊天浮层，不再被 UserVar 去重机制吞掉。
 12. **轻装**：简体中文本地化整体移除（`language` 字段仍作为 deprecated 字段保留兼容），新增 `smart_tab_mode`，zsh 暗色主题下托管注释的高亮更清晰，依赖 audit clean，新增日志、clippy、提示元数据三道 CI 门禁。
+13. **Codex 后端**：Kaku Assistant 现在可以直接用你已有的 `codex`（ChatGPT）登录作为后端，走 Responses API，无需另配 API key。在 `kaku ai` 里把 Auth Type 设为 `codex`、选 `gpt-5-codex` 这类 Codex 模型即可启用。
+14. **AI 聊天渲染**：聊天浮层现在由自身输出驱动重绘，流式回复和加载动画实时刷新，不再需要点一下才更新；所有聊天加载指示统一成同一个 sparkle spinner。
 
 > https://github.com/tw93/Kaku
