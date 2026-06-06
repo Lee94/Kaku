@@ -1,0 +1,846 @@
+//! win32 `Window` implementation.
+//!
+//! This is the initial bring-up of the Windows window backend, restored/adapted
+//! from the upstream WezTerm win32 backend to Kaku's diverged `WindowOps` trait.
+//! It creates a real top-level window, runs a `WndProc`, and routes the core
+//! lifecycle events (paint/resize/close/destroy) through the shared
+//! `WindowEventSender`. Rendering uses the WebGpu front-end via the
+//! `raw-window-handle` impls below; `enable_opengl` intentionally errors so the
+//! OpenGL/ANGLE path is not yet required (set `front_end = "WebGpu"`).
+//!
+//! Not yet implemented (tracked as later phases): keyboard/mouse/IME input
+//! translation, native clipboard, per-monitor DPI change handling, fullscreen,
+//! window-level/position control, and the OpenGL context.
+
+#![allow(clippy::let_unit_value)]
+
+use super::keycodes;
+use crate::connection::ConnectionOps;
+use crate::{
+    Appearance, Clipboard, ClipboardData, Connection, Dimensions, KeyCode, KeyEvent,
+    KeyboardLedStatus, Modifiers, MouseCursor, MouseEvent, MouseEventKind, MousePress, Point,
+    RequestedWindowGeometry, ResolvedGeometry, ScreenPoint, WindowEvent, WindowEventSender,
+    WindowOps, WindowState,
+};
+use anyhow::{anyhow, bail};
+use async_trait::async_trait;
+use config::ConfigHandle;
+use promise::Future;
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+    RawWindowHandle, Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
+};
+use std::any::Any;
+use std::ffi::OsStr;
+use std::io::Error as IoError;
+use std::num::NonZeroIsize;
+use std::os::windows::ffi::OsStrExt;
+use std::ptr::{null, null_mut};
+use std::rc::Rc;
+use std::sync::Once;
+use wezterm_font::FontConfiguration;
+use winapi::shared::minwindef::{BOOL, LPARAM, LRESULT, UINT, WPARAM};
+use winapi::shared::windef::{HWND, POINT, RECT};
+use winapi::um::libloaderapi::GetModuleHandleW;
+use winapi::um::winuser::*;
+
+const WINDOW_CLASS_NAME: &str = "KakuWindowClass";
+
+thread_local! {
+    /// When WM_KEYDOWN dispatches a Ctrl/Alt key combo itself, the message loop's
+    /// TranslateMessage still posts a (cooked, modifier-less) WM_CHAR for it.
+    /// This flag tells the next WM_CHAR to swallow that duplicate.
+    static SWALLOW_NEXT_CHAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Encode a Rust string as a NUL-terminated wide (UTF-16) string for win32 APIs.
+fn wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// Owns the native window handle plus the per-window event sender. Kept on the
+/// GUI thread inside `Connection::windows`; never sent across threads, so the
+/// raw `HWND` does not need to be `Send`.
+pub(crate) struct WindowInner {
+    pub(crate) hwnd: HWND,
+    pub(crate) events: WindowEventSender,
+    pub(crate) dimensions: Dimensions,
+    /// Desired cursor shape, re-applied on WM_SETCURSOR over the client area.
+    pub(crate) cursor: Option<MouseCursor>,
+    /// True when the system title bar is removed and Kaku draws its own (the GUI
+    /// renders integrated title buttons + tab bar). Drives WM_NCCALCSIZE/NCHITTEST.
+    pub(crate) custom_decorations: bool,
+    #[allow(dead_code)]
+    pub(crate) window_id: usize,
+    /// Accumulates fractional vertical wheel delta. High-resolution devices
+    /// (precision touchpads, free-spin mice) report many sub-`WHEEL_DELTA`
+    /// (120) steps; without accumulation each small step floors to zero and is
+    /// dropped, so touchpad scrolling feels unresponsive.
+    pub(crate) wheel_remainder: i16,
+}
+
+/// Map our platform-independent cursor to a win32 system cursor handle.
+fn cursor_to_hcursor(cursor: Option<MouseCursor>) -> winapi::shared::windef::HCURSOR {
+    let name = match cursor {
+        Some(MouseCursor::Text) => IDC_IBEAM,
+        Some(MouseCursor::Hand) => IDC_HAND,
+        Some(MouseCursor::SizeUpDown) => IDC_SIZENS,
+        Some(MouseCursor::SizeLeftRight) => IDC_SIZEWE,
+        Some(MouseCursor::Grabbing) => IDC_SIZEALL,
+        Some(MouseCursor::Arrow) | None => IDC_ARROW,
+    };
+    unsafe { LoadCursorW(null_mut(), name) }
+}
+
+/// Public, cheaply-cloneable handle to a window, addressed by id (mirrors the
+/// macОS backend so the rest of the crate is platform-agnostic).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct Window {
+    id: usize,
+}
+
+#[cfg(test)]
+impl Window {
+    pub(crate) fn for_test(id: usize) -> Self {
+        Self { id }
+    }
+}
+
+impl Window {
+    /// Copy the HWND out of the window-inner with only a brief borrow. Callers
+    /// must NOT hold a `WindowInner` borrow while invoking win32 functions like
+    /// `ShowWindow`/`SetWindowPos`/`DestroyWindow`, because those synchronously
+    /// re-enter the WndProc which borrows the same cell.
+    fn hwnd(&self) -> Option<HWND> {
+        let conn = Connection::get()?;
+        let inner = conn.window_by_id(self.id)?;
+        let hwnd = inner.borrow().hwnd;
+        Some(hwnd)
+    }
+
+    /// Run `f(hwnd)` on the GUI thread. `WindowOps` methods may be called from
+    /// any thread (e.g. the PTY reader thread calling `invalidate`), but the
+    /// thread-local `Connection` and win32 window operations only work on the
+    /// GUI thread, so we hop there via the spawn queue. The HWND is read under a
+    /// brief borrow and the borrow is released before `f` runs, so win32 calls
+    /// that synchronously re-enter the WndProc (e.g. `SetWindowPos`) don't find
+    /// the `WindowInner` already borrowed.
+    fn run_on_main_with_hwnd<F: FnOnce(HWND) + Send + 'static>(&self, f: F) {
+        let id = self.id;
+        promise::spawn::spawn_into_main_thread(async move {
+            if let Some(conn) = Connection::get() {
+                if let Some(inner) = conn.window_by_id(id) {
+                    let hwnd = inner.borrow().hwnd;
+                    f(hwnd);
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub async fn new_window<F>(
+        _class_name: &str,
+        name: &str,
+        geometry: RequestedWindowGeometry,
+        _config: Option<&ConfigHandle>,
+        _font_config: Rc<FontConfiguration>,
+        event_handler: F,
+    ) -> anyhow::Result<Window>
+    where
+        F: 'static + FnMut(WindowEvent, &Window),
+    {
+        let conn = Connection::get().ok_or_else(|| anyhow!("new_window called without a connection"))?;
+
+        let config = match _config {
+            Some(c) => c.clone(),
+            None => config::configuration(),
+        };
+        // When the user keeps the system TITLE bar we use the normal frame;
+        // otherwise Kaku draws its own title bar (tab bar + integrated buttons)
+        // and we strip the native one via WM_NCCALCSIZE.
+        let custom_decorations =
+            !config.window_decorations.contains(crate::WindowDecorations::TITLE);
+
+        let ResolvedGeometry {
+            width,
+            height,
+            x,
+            y,
+        } = conn.resolve_geometry(geometry);
+
+        register_class();
+
+        let class_name = wide(WINDOW_CLASS_NAME);
+        let title = wide(name);
+        let hinstance = unsafe { GetModuleHandleW(null()) };
+
+        // Convert the requested client-area size into an overall window size.
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
+        };
+        unsafe {
+            AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, 0);
+        }
+        let outer_w = rect.right - rect.left;
+        let outer_h = rect.bottom - rect.top;
+        let pos_x = x.unwrap_or(CW_USEDEFAULT);
+        let pos_y = y.unwrap_or(CW_USEDEFAULT);
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                title.as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                pos_x,
+                pos_y,
+                outer_w,
+                outer_h,
+                null_mut(),
+                null_mut(),
+                hinstance,
+                null_mut(),
+            )
+        };
+        if hwnd.is_null() {
+            bail!("CreateWindowExW failed: {}", IoError::last_os_error());
+        }
+
+        let window_id = conn.next_window_id();
+        let events = WindowEventSender::new(event_handler);
+        let inner = Rc::new(std::cell::RefCell::new(WindowInner {
+            hwnd,
+            events: events.clone(),
+            dimensions: Dimensions {
+                pixel_width: width,
+                pixel_height: height,
+                dpi: conn.default_dpi() as usize,
+            },
+            cursor: None,
+            custom_decorations,
+            window_id,
+            wheel_remainder: 0,
+        }));
+        conn.windows.borrow_mut().insert(window_id, inner);
+
+        // Associate the window id with the HWND so WndProc can route messages.
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, window_id as isize);
+        }
+
+        // Now that WndProc can see custom_decorations, re-run the frame calc to
+        // strip the title bar and keep the DWM shadow.
+        if custom_decorations {
+            apply_custom_decorations(hwnd);
+        }
+
+        // Theme the native title bar to the current OS appearance up front so a
+        // dark-mode launch doesn't flash a white title bar before the GUI pushes
+        // the color-scheme-accurate value via set_window_titlebar_dark().
+        set_titlebar_dark_mode(
+            hwnd,
+            matches!(
+                conn.get_appearance(),
+                Appearance::Dark | Appearance::DarkHighContrast
+            ),
+        );
+
+        let window = Window { id: window_id };
+        events.assign_window(window.clone());
+        Ok(window)
+    }
+}
+
+fn register_class() {
+    static REGISTERED: Once = Once::new();
+    REGISTERED.call_once(|| unsafe {
+        let class_name = wide(WINDOW_CLASS_NAME);
+        let hinstance = GetModuleHandleW(null());
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as UINT,
+            style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
+            lpfnWndProc: Some(wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinstance,
+            hIcon: null_mut(),
+            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+            hbrBackground: null_mut(),
+            lpszMenuName: null(),
+            lpszClassName: class_name.as_ptr(),
+            hIconSm: null_mut(),
+        };
+        RegisterClassExW(&wc);
+    });
+}
+
+/// Apply Kaku's custom (title-bar-less) decorations: extend the DWM frame a hair
+/// so the shadow/rounded corners survive, then force a non-client recalc so
+/// WM_NCCALCSIZE strips the title bar.
+fn apply_custom_decorations(hwnd: HWND) {
+    unsafe {
+        let margins = winapi::um::uxtheme::MARGINS {
+            cxLeftWidth: 0,
+            cxRightWidth: 0,
+            cyTopHeight: 1,
+            cyBottomHeight: 0,
+        };
+        winapi::um::dwmapi::DwmExtendFrameIntoClientArea(hwnd, &margins);
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// Toggle the system title bar between its light and dark presentation via the
+/// DWM immersive-dark-mode attribute, so the native title bar matches Kaku's
+/// theme. The attribute index is 20 on Windows 10 20H1+/Windows 11; older 19xx
+/// builds used 19, so fall back to that if the first call fails.
+fn set_titlebar_dark_mode(hwnd: HWND, dark: bool) {
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1: u32 = 19;
+    let value: BOOL = if dark { 1 } else { 0 };
+    let size = std::mem::size_of::<BOOL>() as u32;
+    unsafe {
+        let hr = winapi::um::dwmapi::DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &value as *const BOOL as *const _,
+            size,
+        );
+        if hr < 0 {
+            winapi::um::dwmapi::DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
+                &value as *const BOOL as *const _,
+                size,
+            );
+        }
+    }
+}
+
+/// True when a `WM_SETTINGCHANGE` `lparam` names the "ImmersiveColorSet" area,
+/// which Windows broadcasts when the user toggles the system Light/Dark theme.
+fn setting_change_is_immersive_color(lparam: LPARAM) -> bool {
+    if lparam == 0 {
+        return false;
+    }
+    let ptr = lparam as *const u16;
+    let mut len = 0usize;
+    unsafe {
+        // A NUL-terminated UTF-16 system constant; cap the scan to guard against
+        // a malformed pointer.
+        while len < 64 && *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        String::from_utf16_lossy(slice) == "ImmersiveColorSet"
+    }
+}
+
+/// Resize-border hit-test for a title-bar-less window. Returns an HT* code for
+/// the window edges/corners, or HTCLIENT for the interior (the GUI handles drag
+/// via `request_drag_move` and clicks on tabs/buttons).
+unsafe fn hit_test_nc(hwnd: HWND, screen_x: i32, screen_y: i32) -> isize {
+    let mut rect: RECT = std::mem::zeroed();
+    if GetWindowRect(hwnd, &mut rect) == 0 {
+        return HTCLIENT;
+    }
+    let dpi = GetDpiForWindow(hwnd);
+    let dpi = if dpi == 0 { 96 } else { dpi };
+    // ~8 logical px resize border, scaled for DPI.
+    let border = (8 * dpi as i32) / 96;
+    let left = screen_x < rect.left + border;
+    let right = screen_x >= rect.right - border;
+    let top = screen_y < rect.top + border;
+    let bottom = screen_y >= rect.bottom - border;
+    match (top, bottom, left, right) {
+        (true, _, true, _) => HTTOPLEFT,
+        (true, _, _, true) => HTTOPRIGHT,
+        (_, true, true, _) => HTBOTTOMLEFT,
+        (_, true, _, true) => HTBOTTOMRIGHT,
+        (true, _, _, _) => HTTOP,
+        (_, true, _, _) => HTBOTTOM,
+        (_, _, true, _) => HTLEFT,
+        (_, _, _, true) => HTRIGHT,
+        _ => HTCLIENT,
+    }
+}
+
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: UINT,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let window_id = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as usize;
+    if window_id == 0 {
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    let Some(conn) = Connection::get() else {
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    };
+    let Some(inner_rc) = conn.window_by_id(window_id) else {
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    };
+    // Clone the sender so we don't hold a borrow across the (possibly reentrant)
+    // event dispatch into the GUI callback.
+    let events = inner_rc.borrow().events.clone();
+    let custom = inner_rc.borrow().custom_decorations;
+
+    match msg {
+        // Custom title bar: strip the native non-client frame so Kaku's own tab
+        // bar / title buttons occupy the top.
+        WM_NCCALCSIZE if custom && wparam != 0 => {
+            let p = lparam as *mut NCCALCSIZE_PARAMS;
+            if IsZoomed(hwnd) != 0 {
+                // Maximized windows would otherwise overflow the monitor; inset
+                // by the frame thickness so we fill the work area.
+                let dpi = GetDpiForWindow(hwnd);
+                let dpi = if dpi == 0 { 96 } else { dpi };
+                let fx = GetSystemMetricsForDpi(SM_CXFRAME, dpi)
+                    + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                let fy = GetSystemMetricsForDpi(SM_CYFRAME, dpi)
+                    + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                (*p).rgrc[0].left += fx;
+                (*p).rgrc[0].right -= fx;
+                (*p).rgrc[0].top += fy;
+                (*p).rgrc[0].bottom -= fy;
+            }
+            // Non-maximized: leave the proposed rect as-is (whole window becomes
+            // client area; resize is handled by WM_NCHITTEST).
+            0
+        }
+        WM_NCHITTEST if custom => {
+            let x = (lparam & 0xffff) as i16 as i32;
+            let y = ((lparam >> 16) & 0xffff) as i16 as i32;
+            hit_test_nc(hwnd, x, y)
+        }
+        WM_PAINT => {
+            ValidateRect(hwnd, null());
+            events.dispatch(WindowEvent::NeedRepaint);
+            0
+        }
+        WM_SIZE => {
+            let width = (lparam & 0xffff) as usize;
+            let height = ((lparam >> 16) & 0xffff) as usize;
+            let dpi = {
+                let d = GetDpiForWindow(hwnd);
+                if d == 0 {
+                    crate::DEFAULT_DPI as usize
+                } else {
+                    d as usize
+                }
+            };
+            let dimensions = Dimensions {
+                pixel_width: width,
+                pixel_height: height,
+                dpi,
+            };
+            inner_rc.borrow_mut().dimensions = dimensions;
+            events.dispatch(WindowEvent::Resized {
+                dimensions,
+                window_state: WindowState::empty(),
+                live_resizing: wparam == SIZE_RESTORED as WPARAM,
+                screen_changed: false,
+            });
+            0
+        }
+        WM_DPICHANGED => {
+            // Moved to a monitor with a different scale. Windows passes the
+            // suggested new window rect in lparam; honor it, which triggers a
+            // WM_SIZE that re-reads GetDpiForWindow and re-lays-out the grid.
+            let suggested = lparam as *const RECT;
+            if !suggested.is_null() {
+                let r = &*suggested;
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            0
+        }
+        WM_SETCURSOR => {
+            // Re-apply our desired cursor when the mouse is over the client
+            // area; otherwise let the default proc handle borders/buttons.
+            if (lparam & 0xffff) == HTCLIENT {
+                let cursor = inner_rc.borrow().cursor;
+                SetCursor(cursor_to_hcursor(cursor));
+                return 1; // TRUE: handled
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_SETFOCUS => {
+            events.dispatch(WindowEvent::FocusChanged(true));
+            0
+        }
+        WM_KILLFOCUS => {
+            events.dispatch(WindowEvent::FocusChanged(false));
+            0
+        }
+        WM_CHAR => {
+            // Swallow the duplicate WM_CHAR that TranslateMessage posts for a
+            // Ctrl/Alt combo we already dispatched from WM_KEYDOWN.
+            if SWALLOW_NEXT_CHAR.with(|s| s.replace(false)) {
+                return 0;
+            }
+            // WM_CHAR delivers the layout-translated character for plain text
+            // (including IME/dead-key composition). Modifiers are baked into the
+            // char already, so report NONE here.
+            if let Some(c) = char::from_u32(wparam as u32) {
+                if c != '\0' {
+                    events.dispatch(WindowEvent::KeyEvent(KeyEvent {
+                        key: KeyCode::Char(c),
+                        modifiers: Modifiers::NONE,
+                        leds: KeyboardLedStatus::empty(),
+                        repeat_count: 1,
+                        key_is_down: true,
+                        raw: None,
+                        win32_uni_char: Some(c),
+                    }));
+                }
+            }
+            0
+        }
+        WM_KEYDOWN => {
+            let vk = wparam as i32;
+            let mods = keycodes::current_modifiers();
+            let repeat = (lparam & 0xffff) as u16;
+            // Navigation/function keys don't produce WM_CHAR; translate them here.
+            if let Some(key) = keycodes::vkey_to_keycode(vk) {
+                events.dispatch(WindowEvent::KeyEvent(KeyEvent {
+                    key,
+                    modifiers: mods,
+                    leds: KeyboardLedStatus::empty(),
+                    repeat_count: repeat,
+                    key_is_down: true,
+                    raw: None,
+                    win32_uni_char: None,
+                }));
+                return 0;
+            }
+            // Ctrl/Alt + key must reach keybindings (paste, new tab, ...) with
+            // modifiers intact; WM_CHAR would deliver a cooked control char with
+            // no modifiers. Dispatch it here and swallow the duplicate WM_CHAR.
+            // Plain keys fall through to WM_CHAR for layout/IME handling.
+            if mods.intersects(Modifiers::CTRL | Modifiers::ALT) {
+                if let Some(c) = keycodes::vkey_to_char(vk) {
+                    events.dispatch(WindowEvent::KeyEvent(KeyEvent {
+                        key: KeyCode::Char(c),
+                        modifiers: mods,
+                        leds: KeyboardLedStatus::empty(),
+                        repeat_count: repeat,
+                        key_is_down: true,
+                        raw: None,
+                        win32_uni_char: None,
+                    }));
+                    SWALLOW_NEXT_CHAR.with(|s| s.set(true));
+                    return 0;
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_MOUSEMOVE => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Move,
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_LBUTTONDOWN => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Press(MousePress::Left),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_LBUTTONUP => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Release(MousePress::Left),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_RBUTTONDOWN => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Press(MousePress::Right),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_RBUTTONUP => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Release(MousePress::Right),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_MBUTTONDOWN => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Press(MousePress::Middle),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_MBUTTONUP => {
+            events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                MouseEventKind::Release(MousePress::Middle),
+                wparam,
+                lparam,
+            )));
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam >> 16) & 0xffff) as i16;
+            // Accumulate against the carried remainder and emit one notch per
+            // whole WHEEL_DELTA (120). Precision touchpads and free-spin mice
+            // report many sub-120 steps; flooring each to zero would drop them
+            // and make scrolling feel unresponsive. Truncation toward zero keeps
+            // this correct in both directions. Hold the borrow only long enough
+            // to update the remainder (the dispatch below may reenter the proc).
+            let notches = {
+                let mut inner = inner_rc.borrow_mut();
+                let accumulated = inner.wheel_remainder as i32 + delta as i32;
+                inner.wheel_remainder = (accumulated % 120) as i16;
+                (accumulated / 120) as i16
+            };
+            if notches != 0 {
+                // Unlike the button/move messages, WM_MOUSEWHEEL reports the
+                // pointer position in *screen* coordinates. Convert to client
+                // space so the GUI hit-tests the wheel against the correct pane
+                // / scrollbar; this matters whenever the window is not at the
+                // screen origin (e.g. maximized, multi-monitor) or has splits.
+                let mut pt = POINT {
+                    x: (lparam & 0xffff) as i16 as i32,
+                    y: ((lparam >> 16) & 0xffff) as i16 as i32,
+                };
+                ScreenToClient(hwnd, &mut pt);
+                let client_lparam =
+                    (((pt.y as u16 as u32) << 16) | (pt.x as u16 as u32)) as LPARAM;
+                events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                    MouseEventKind::VertWheel(notches),
+                    wparam,
+                    client_lparam,
+                )));
+            }
+            0
+        }
+        WM_SETTINGCHANGE => {
+            // A Light/Dark theme switch arrives as a settings change naming the
+            // "ImmersiveColorSet" area. Notify the GUI so it reloads the
+            // appearance-driven color scheme; the GUI is the single source of
+            // truth for the title-bar theme and pushes the resolved value back
+            // via set_window_titlebar_dark (so a user-forced scheme is honored
+            // rather than overridden by the OS theme here).
+            if setting_change_is_immersive_color(lparam) {
+                events.dispatch(WindowEvent::AppearanceChanged(conn.get_appearance()));
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_CLOSE => {
+            events.dispatch(WindowEvent::CloseRequested);
+            0
+        }
+        WM_DESTROY => {
+            events.dispatch(WindowEvent::Destroyed);
+            conn.windows.borrow_mut().remove(&window_id);
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// Build a `MouseEvent` from a mouse message's `wparam`/`lparam`.
+///
+/// `lparam` must hold *client* coordinates. The button/move messages already
+/// do; `WM_MOUSEWHEEL` reports screen coordinates, so its handler converts via
+/// `ScreenToClient` before calling here.
+fn make_mouse(kind: MouseEventKind, wparam: WPARAM, lparam: LPARAM) -> MouseEvent {
+    let x = (lparam & 0xffff) as i16 as isize;
+    let y = ((lparam >> 16) & 0xffff) as i16 as isize;
+    MouseEvent {
+        kind,
+        coords: Point::new(x, y),
+        screen_coords: ScreenPoint::new(x, y),
+        mouse_buttons: keycodes::mouse_buttons_from_wparam(wparam),
+        modifiers: keycodes::current_modifiers(),
+        platform_click_count: 0,
+    }
+}
+
+#[async_trait(?Send)]
+impl WindowOps for Window {
+    async fn enable_opengl(&self) -> anyhow::Result<Rc<glium::backend::Context>> {
+        bail!("the OpenGL front_end is not yet implemented on Windows; set front_end = \"WebGpu\"")
+    }
+
+    fn notify<T: Any + Send + Sync>(&self, t: T)
+    where
+        Self: Sized,
+    {
+        let id = self.id;
+        promise::spawn::spawn_into_main_thread(async move {
+            if let Some(conn) = Connection::get() {
+                if let Some(inner) = conn.window_by_id(id) {
+                    let events = inner.borrow().events.clone();
+                    events.dispatch(WindowEvent::Notification(Box::new(t)));
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn show(&self) {
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ShowWindow(hwnd, SW_SHOW);
+        });
+    }
+
+    fn hide(&self) {
+        // The integrated "minimize" title button maps to hide(); minimize to the
+        // taskbar rather than SW_HIDE (which would remove it from the taskbar).
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ShowWindow(hwnd, SW_MINIMIZE);
+        });
+    }
+
+    fn close(&self) {
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            DestroyWindow(hwnd);
+        });
+    }
+
+    fn focus(&self) {
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            SetForegroundWindow(hwnd);
+        });
+    }
+
+    fn maximize(&self) {
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ShowWindow(hwnd, SW_MAXIMIZE);
+        });
+    }
+
+    fn restore(&self) {
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ShowWindow(hwnd, SW_RESTORE);
+        });
+    }
+
+    fn request_drag_move(&self) {
+        // Hand the in-progress left-button drag to the system move loop. The GUI
+        // calls this while the button is down over a draggable title-bar region.
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            ReleaseCapture();
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as WPARAM, 0);
+        });
+    }
+
+    fn set_cursor(&self, cursor: Option<MouseCursor>) {
+        Connection::with_window_inner(self.id, move |inner| {
+            inner.cursor = cursor;
+            unsafe {
+                SetCursor(cursor_to_hcursor(cursor));
+            }
+            Ok(())
+        });
+    }
+
+    fn invalidate(&self) {
+        self.run_on_main_with_hwnd(|hwnd| unsafe {
+            InvalidateRect(hwnd, null(), 0);
+        });
+    }
+
+    fn set_title(&self, title: &str) {
+        let wide_title = wide(title);
+        self.run_on_main_with_hwnd(move |hwnd| unsafe {
+            SetWindowTextW(hwnd, wide_title.as_ptr());
+        });
+    }
+
+    fn set_window_titlebar_dark(&self, dark: bool) {
+        self.run_on_main_with_hwnd(move |hwnd| {
+            log::debug!("set_window_titlebar_dark: applying dark={dark}");
+            set_titlebar_dark_mode(hwnd, dark);
+        });
+    }
+
+    fn set_inner_size(&self, width: usize, height: usize) {
+        self.run_on_main_with_hwnd(move |hwnd| {
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: width as i32,
+                bottom: height as i32,
+            };
+            unsafe {
+                AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, 0);
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        });
+    }
+
+    fn get_clipboard(&self, _clipboard: Clipboard) -> Future<String> {
+        Future::ok(super::clipboard::get_clipboard_text())
+    }
+
+    fn get_clipboard_data(&self, _clipboard: Clipboard) -> Future<ClipboardData> {
+        Future::ok(ClipboardData::Text(super::clipboard::get_clipboard_text()))
+    }
+
+    fn set_clipboard(&self, _clipboard: Clipboard, text: String) {
+        super::clipboard::set_clipboard_text(&text);
+    }
+}
+
+impl HasDisplayHandle for Window {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        unsafe {
+            Ok(DisplayHandle::borrow_raw(RawDisplayHandle::Windows(
+                WindowsDisplayHandle::new(),
+            )))
+        }
+    }
+}
+
+impl HasWindowHandle for Window {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        let hwnd = self.hwnd().ok_or(HandleError::Unavailable)?;
+        let mut handle = Win32WindowHandle::new(
+            NonZeroIsize::new(hwnd as isize).ok_or(HandleError::Unavailable)?,
+        );
+        let hinstance = unsafe { GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) };
+        handle.hinstance = NonZeroIsize::new(hinstance);
+        unsafe { Ok(WindowHandle::borrow_raw(RawWindowHandle::Win32(handle))) }
+    }
+}

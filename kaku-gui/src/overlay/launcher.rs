@@ -402,7 +402,12 @@ impl LauncherState {
 
         // Keep the encoding submenu entry at the very end so it doesn't steal
         // the first numeric shortcut from tabs or primary launcher commands.
-        if !args.flags.contains(LauncherFlags::PANE_ENCODINGS) {
+        // Skip it for a focused launch-menu-only picker (e.g. the new-tab shell
+        // picker), which should list only its configured entries. FUZZY is a
+        // display modifier, so ignore it when deciding.
+        let is_launch_menu_only =
+            args.flags.difference(LauncherFlags::FUZZY) == LauncherFlags::LAUNCH_MENU_ITEMS;
+        if !args.flags.contains(LauncherFlags::PANE_ENCODINGS) && !is_launch_menu_only {
             self.entries.push(Entry {
                 label: "Pane Encoding".to_string(),
                 action: KeyAssignment::ShowLauncherArgs(LauncherActionArgs {

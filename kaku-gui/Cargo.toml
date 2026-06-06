@@ -124,9 +124,13 @@ window.workspace = true
 [target.'cfg(target_os="macos")'.dependencies]
 cocoa.workspace = true
 objc.workspace = true
+wgpu = { workspace = true, features = ["metal"] }
 
 [target.'cfg(windows)'.dependencies]
 shared_library.workspace = true
+# DX12 is the native backend on Windows 10/11. vulkan/gles can be added here
+# later for broader GPU coverage; DX12 alone keeps the first bring-up minimal.
+wgpu = { workspace = true, features = ["dx12"] }
 winapi = { workspace=true, features = [
     "winuser",
     "consoleapi",

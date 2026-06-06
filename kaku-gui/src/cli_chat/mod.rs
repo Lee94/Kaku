@@ -508,10 +508,10 @@ fn render_tui(term: &mut dyn Terminal, tui: &Tui) -> termwiz::Result<()> {
 }
 
 fn run_repl(engine: &mut Engine) -> anyhow::Result<()> {
-    use termwiz::terminal::UnixTerminal;
+    use termwiz::terminal::SystemTerminal;
 
     let caps = Capabilities::new_from_env()?;
-    let mut term = UnixTerminal::new(caps)?;
+    let mut term = SystemTerminal::new(caps)?;
     term.enter_alternate_screen()?;
     term.set_raw_mode()?;
 

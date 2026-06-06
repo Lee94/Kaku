@@ -954,6 +954,16 @@ fn maybe_show_configuration_error_window() {
     }
 }
 
+/// Encode a string as a NUL-terminated wide (UTF-16) buffer for win32 PCWSTR args.
+#[cfg(windows)]
+fn wide_string(s: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
 fn run() -> anyhow::Result<()> {
     // Inform the system of our AppUserModelID.
     // Without this, our toast notifications won't be correctly

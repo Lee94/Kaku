@@ -90,6 +90,17 @@ fn toast_colors_for_palette(
 impl crate::TermWindow {
     pub fn paint_impl(&mut self, frame: &mut RenderFrame) -> anyhow::Result<()> {
         self.num_frames += 1;
+
+        // Keep the native (system-drawn) title bar's light/dark matched to the
+        // live color scheme. Gated on the global config generation so this only
+        // re-evaluates after a reload, not every frame. This works even where
+        // the per-window config-reload handler doesn't fire (Windows), since the
+        // paint loop always runs after a config change repaints.
+        let cfg_gen = config::configuration().generation();
+        if self.last_titlebar_config_gen != cfg_gen {
+            self.last_titlebar_config_gen = cfg_gen;
+            self.sync_titlebar_appearance();
+        }
         let is_first_paint = !self.first_paint_logged;
         if is_first_paint {
             crate::startup_trace::mark("first paint_impl start");

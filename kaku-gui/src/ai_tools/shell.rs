@@ -3,8 +3,6 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -15,11 +13,39 @@ use super::paths::resolve;
 /// Wall-clock ceiling for a single `shell_exec` invocation.
 pub(super) const SHELL_EXEC_TIMEOUT_SECS: u64 = 60;
 
-/// SIGKILL the entire process group. Required because `Child::kill()` only
-/// signals the direct child (the login shell), leaving grandchildren running.
+/// Kill the entire process tree of `child`. `Child::kill()` only signals the
+/// direct child (the login shell), leaving grandchildren running.
+#[cfg(unix)]
 pub(super) fn kill_process_group(child: &std::process::Child) {
     unsafe {
         libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+/// Windows has no process groups in the POSIX sense; terminate the whole tree
+/// with `taskkill /T`. Takes `&Child` (not `&mut`) to match the unix signature
+/// and the `Drop`/cancellation call sites.
+#[cfg(windows)]
+pub(super) fn kill_process_group(child: &std::process::Child) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &child.id().to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Place the child in its own process group so the whole tree can be signaled
+/// together (see `kill_process_group`). No-op on Windows, where tree teardown is
+/// done with `taskkill /T` instead.
+pub(super) fn set_process_group(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
     }
 }
 
@@ -96,28 +122,52 @@ pub(super) fn exec_shell_exec(
     // create_new + mode 0o600 ensures we own the file exclusively before the shell writes to it.
     // Propagate on failure: an EEXIST or symlink collision here would allow the shell redirection
     // to follow a pre-placed symlink, turning this into a write-anywhere primitive.
-    std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
+    let mut cwd_tmp_opts = std::fs::OpenOptions::new();
+    cwd_tmp_opts.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        cwd_tmp_opts.mode(0o600);
+    }
+    cwd_tmp_opts
         .open(&cwd_tmp_path)
         .with_context(|| format!("could not create temp cwd file {}", cwd_tmp_path.display()))?;
-    let wrapped = format!(
-        "{}; __kaku_rc=$?; printf '%s' \"$(pwd)\" > {}; exit $__kaku_rc",
-        command,
-        cwd_tmp_path.display()
-    );
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     let streaming_cap = cap.saturating_sub(512);
 
-    let mut child = std::process::Command::new(&shell)
-        .arg("-l")
-        .arg("-c")
-        .arg(&wrapped)
-        .current_dir(&exec_cwd)
+    // Build the shell invocation: run the command, capture the resulting working
+    // directory into cwd_tmp_path, then exit with the command's own status.
+    #[cfg(unix)]
+    let (shell, mut cmd) = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        let wrapped = format!(
+            "{}; __kaku_rc=$?; printf '%s' \"$(pwd)\" > {}; exit $__kaku_rc",
+            command,
+            cwd_tmp_path.display()
+        );
+        let mut cmd = std::process::Command::new(&shell);
+        cmd.arg("-l").arg("-c").arg(wrapped);
+        (shell, cmd)
+    };
+    #[cfg(windows)]
+    let (shell, mut cmd) = {
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        // `cd` with no args prints the cwd; delayed expansion (/V:ON) preserves
+        // the command's exit code across the capture.
+        let wrapped = format!(
+            "{} & set __kaku_rc=!ERRORLEVEL! & cd > \"{}\" & exit /b !__kaku_rc!",
+            command,
+            cwd_tmp_path.display()
+        );
+        let mut cmd = std::process::Command::new(&shell);
+        cmd.arg("/V:ON").arg("/C").arg(wrapped);
+        (shell, cmd)
+    };
+
+    cmd.current_dir(&exec_cwd)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .process_group(0)
+        .stderr(std::process::Stdio::piped());
+    set_process_group(&mut cmd);
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("shell exec failed ({})", shell))?;
 
@@ -231,15 +281,25 @@ pub(super) fn exec_shell_bg(args: &serde_json::Value, cwd: &mut String) -> Resul
         .map(|p| resolve(p, cwd))
         .transpose()?
         .unwrap_or_else(|| PathBuf::from(cwd.as_str()));
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    let mut child = std::process::Command::new(&shell)
-        .arg("-l")
-        .arg("-c")
-        .arg(command)
-        .current_dir(&exec_cwd)
+    #[cfg(unix)]
+    let mut cmd = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        let mut cmd = std::process::Command::new(shell);
+        cmd.arg("-l").arg("-c").arg(command);
+        cmd
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        let mut cmd = std::process::Command::new(shell);
+        cmd.arg("/C").arg(command);
+        cmd
+    };
+    cmd.current_dir(&exec_cwd)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .process_group(0)
+        .stderr(std::process::Stdio::piped());
+    set_process_group(&mut cmd);
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to spawn background command: {}", command))?;
     let pid = child.id();

@@ -445,6 +445,12 @@ pub trait WindowOps {
 
     fn config_did_change(&self, _config: &config::ConfigHandle) {}
 
+    /// Update the native (system-drawn) title bar's light/dark appearance.
+    /// Implemented where the OS draws the title bar (Windows, via the DWM
+    /// immersive-dark-mode attribute). macOS pins the `NSWindow` appearance
+    /// through its own path, so the default no-op is correct there.
+    fn set_window_titlebar_dark(&self, _dark: bool) {}
+
     /// Check if the window is in a zoom (maximize/restore) animation.
     /// Returns true if within the animation period to allow hiding content
     /// during the transition to avoid visual flickering.
