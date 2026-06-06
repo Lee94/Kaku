@@ -3284,7 +3284,15 @@ fn default_macos_forward_mods() -> Modifiers {
 fn default_macos_global_hotkey() -> Option<KeyNoAction> {
     Some(KeyNoAction {
         key: DeferredKeyCode::try_from("K").expect("default global hotkey key to parse"),
-        mods: Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER,
+        // The Windows global hotkey reuses this field, but RegisterHotKey
+        // cannot bind the Win (Super) modifier — Win+K is reserved by the OS
+        // (Connect/Cast) — so the macOS default Ctrl+Alt+Cmd+K would silently
+        // fail to register. Use a registrable Ctrl+Alt+K there instead.
+        mods: if cfg!(windows) {
+            Modifiers::CTRL | Modifiers::ALT
+        } else {
+            Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER
+        },
     })
 }
 

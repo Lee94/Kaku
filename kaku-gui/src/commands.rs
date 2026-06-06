@@ -138,6 +138,68 @@ impl CommandDef {
                 keys.push((mods, ukey.clone()));
                 keys.push((mods - Modifiers::SHIFT, ukey.clone()));
             }
+
+            // On Windows the macOS Cmd (Super) accelerators that carry an
+            // additional modifier land on the reserved Win key and can't be
+            // typed (bare Cmd combos are already mirrored to Ctrl+Shift just
+            // above). Mirror the multi-modifier defaults to Windows-reachable
+            // equivalents:
+            //   Cmd+Alt+<k>    -> Ctrl+Shift+<k>
+            //   Cmd+Shift+<k>  -> Ctrl+Shift+Alt+<k>   (the bare Cmd+<k> already
+            //                     claims Ctrl+Shift+<k>, so Alt disambiguates)
+            //   Ctrl+Cmd+F     -> F11                  (full screen)
+            // A few rarely-used commands are intentionally left to the Command
+            // Palette / menubar rather than spend scarce key space: split
+            // resize (Cmd+Ctrl+Arrow), move-pane-to-new-tab/window and
+            // restore-window (Cmd+Alt+Shift+*), and reload-config (Cmd+Shift+R,
+            // redundant since config auto-reloads).
+            #[cfg(windows)]
+            {
+                let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+                let ctrl_shift_alt = ctrl_shift | Modifiers::ALT;
+                let super_shift = Modifiers::SUPER | Modifiers::SHIFT;
+                let super_alt = Modifiers::SUPER | Modifiers::ALT;
+                let ctrl_super = Modifiers::CTRL | Modifiers::SUPER;
+                let label = label.as_str();
+
+                if mods == ctrl_super && label == "f" {
+                    keys.push((
+                        Modifiers::NONE,
+                        DeferredKeyCode::try_from("F11")
+                            .unwrap()
+                            .resolve(config.key_map_preference)
+                            .clone(),
+                    ));
+                } else if mods == super_alt
+                    && matches!(
+                        label,
+                        "p" | "i" | "LeftArrow" | "RightArrow" | "UpArrow" | "DownArrow"
+                    )
+                {
+                    keys.push((ctrl_shift, key.clone()));
+                } else if mods == super_shift
+                    && matches!(
+                        label,
+                        "UpArrow"
+                            | "a"
+                            | "e"
+                            | "g"
+                            | "y"
+                            | "r"
+                            | "w"
+                            | "t"
+                            | "`"
+                            | "d"
+                            | "Enter"
+                            | "i"
+                            | "o"
+                            | "s"
+                            | "p"
+                    )
+                {
+                    keys.push((ctrl_shift_alt, key.clone()));
+                }
+            }
         }
 
         keys
@@ -2817,5 +2879,44 @@ mod tests {
         assert!(CommandDef::actions_for_palette_only(&config)
             .iter()
             .any(|cmd| cmd.action == KeyAssignment::RestorePreviousWindow));
+    }
+
+    /// On Windows the macOS Cmd accelerators that carry an extra modifier are
+    /// unreachable (they map onto the reserved Win key), so `permute_keys`
+    /// synthesizes Windows-reachable equivalents. Verify a representative set.
+    #[cfg(windows)]
+    #[test]
+    fn windows_multi_modifier_defaults_are_reachable() {
+        let config = ConfigHandle::default_config();
+        let assignments = CommandDef::default_key_assignments(&config);
+
+        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+        let ctrl_shift_alt = ctrl_shift | Modifiers::ALT;
+
+        // Ctrl+Cmd+F (Full Screen) -> a no-modifier F11 binding.
+        assert!(
+            assignments
+                .iter()
+                .any(|(mods, _key, action)| *mods == Modifiers::NONE
+                    && *action == KeyAssignment::ToggleFullScreen),
+            "Full Screen should be reachable via F11 on Windows"
+        );
+
+        // Cmd+Shift+A (AI Config) -> Ctrl+Shift+Alt+A.
+        assert!(
+            assignments.iter().any(|(mods, _key, action)| {
+                *mods == ctrl_shift_alt
+                    && matches!(action, KeyAssignment::EmitEvent(name) if name == "run-kaku-ai-config")
+            }),
+            "AI Config should be reachable via Ctrl+Shift+Alt+A on Windows"
+        );
+
+        // Cmd+Alt+P (Select Pane) -> Ctrl+Shift+P.
+        assert!(
+            assignments.iter().any(|(mods, _key, action)| {
+                *mods == ctrl_shift && matches!(action, KeyAssignment::PaneSelect(_))
+            }),
+            "Select Pane should be reachable via Ctrl+Shift+P on Windows"
+        );
     }
 }
