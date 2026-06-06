@@ -96,11 +96,17 @@ fn main() {
         resource.push_str("// This ID is coupled with code in window/src/os/windows/window.rs\n");
         resource.push_str("#define IDI_ICON 0x101\n");
         if windows_dir.join("manifest.manifest").exists() {
-            resource.push_str(&format!("1 RT_MANIFEST \"{win}\\\\manifest.manifest\"\n", win = win_escaped));
+            resource.push_str(&format!(
+                "1 RT_MANIFEST \"{win}\\\\manifest.manifest\"\n",
+                win = win_escaped
+            ));
         }
         if windows_dir.join("terminal.ico").exists() {
             println!("cargo:rerun-if-changed=../assets/windows/terminal.ico");
-            resource.push_str(&format!("IDI_ICON ICON \"{win}\\\\terminal.ico\"\n", win = win_escaped));
+            resource.push_str(&format!(
+                "IDI_ICON ICON \"{win}\\\\terminal.ico\"\n",
+                win = win_escaped
+            ));
         }
 
         let rcfile_name = Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("resource.rc");
