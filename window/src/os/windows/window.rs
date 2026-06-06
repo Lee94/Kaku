@@ -17,9 +17,10 @@
 use super::keycodes;
 use crate::connection::ConnectionOps;
 use crate::{
-    Clipboard, ClipboardData, Connection, Dimensions, KeyCode, KeyEvent, KeyboardLedStatus,
-    Modifiers, MouseCursor, MouseEvent, MouseEventKind, MousePress, Point, RequestedWindowGeometry,
-    ResolvedGeometry, ScreenPoint, WindowEvent, WindowEventSender, WindowOps, WindowState,
+    Appearance, Clipboard, ClipboardData, Connection, Dimensions, KeyCode, KeyEvent,
+    KeyboardLedStatus, Modifiers, MouseCursor, MouseEvent, MouseEventKind, MousePress, Point,
+    RequestedWindowGeometry, ResolvedGeometry, ScreenPoint, WindowEvent, WindowEventSender,
+    WindowOps, WindowState,
 };
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
@@ -38,8 +39,8 @@ use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use std::sync::Once;
 use wezterm_font::FontConfiguration;
-use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
-use winapi::shared::windef::{HWND, RECT};
+use winapi::shared::minwindef::{BOOL, LPARAM, LRESULT, UINT, WPARAM};
+use winapi::shared::windef::{HWND, POINT, RECT};
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::winuser::*;
 
@@ -71,6 +72,11 @@ pub(crate) struct WindowInner {
     pub(crate) custom_decorations: bool,
     #[allow(dead_code)]
     pub(crate) window_id: usize,
+    /// Accumulates fractional vertical wheel delta. High-resolution devices
+    /// (precision touchpads, free-spin mice) report many sub-`WHEEL_DELTA`
+    /// (120) steps; without accumulation each small step floors to zero and is
+    /// dropped, so touchpad scrolling feels unresponsive.
+    pub(crate) wheel_remainder: i16,
 }
 
 /// Map our platform-independent cursor to a win32 system cursor handle.
@@ -216,6 +222,7 @@ impl Window {
             cursor: None,
             custom_decorations,
             window_id,
+            wheel_remainder: 0,
         }));
         conn.windows.borrow_mut().insert(window_id, inner);
 
@@ -229,6 +236,17 @@ impl Window {
         if custom_decorations {
             apply_custom_decorations(hwnd);
         }
+
+        // Theme the native title bar to the current OS appearance up front so a
+        // dark-mode launch doesn't flash a white title bar before the GUI pushes
+        // the color-scheme-accurate value via set_window_titlebar_dark().
+        set_titlebar_dark_mode(
+            hwnd,
+            matches!(
+                conn.get_appearance(),
+                Appearance::Dark | Appearance::DarkHighContrast
+            ),
+        );
 
         let window = Window { id: window_id };
         events.assign_window(window.clone());
@@ -280,6 +298,52 @@ fn apply_custom_decorations(hwnd: HWND) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
         );
+    }
+}
+
+/// Toggle the system title bar between its light and dark presentation via the
+/// DWM immersive-dark-mode attribute, so the native title bar matches Kaku's
+/// theme. The attribute index is 20 on Windows 10 20H1+/Windows 11; older 19xx
+/// builds used 19, so fall back to that if the first call fails.
+fn set_titlebar_dark_mode(hwnd: HWND, dark: bool) {
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1: u32 = 19;
+    let value: BOOL = if dark { 1 } else { 0 };
+    let size = std::mem::size_of::<BOOL>() as u32;
+    unsafe {
+        let hr = winapi::um::dwmapi::DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &value as *const BOOL as *const _,
+            size,
+        );
+        if hr < 0 {
+            winapi::um::dwmapi::DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
+                &value as *const BOOL as *const _,
+                size,
+            );
+        }
+    }
+}
+
+/// True when a `WM_SETTINGCHANGE` `lparam` names the "ImmersiveColorSet" area,
+/// which Windows broadcasts when the user toggles the system Light/Dark theme.
+fn setting_change_is_immersive_color(lparam: LPARAM) -> bool {
+    if lparam == 0 {
+        return false;
+    }
+    let ptr = lparam as *const u16;
+    let mut len = 0usize;
+    unsafe {
+        // A NUL-terminated UTF-16 system constant; cap the scan to guard against
+        // a malformed pointer.
+        while len < 64 && *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        String::from_utf16_lossy(slice) == "ImmersiveColorSet"
     }
 }
 
@@ -548,12 +612,50 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_MOUSEWHEEL => {
             let delta = ((wparam >> 16) & 0xffff) as i16;
-            events.dispatch(WindowEvent::MouseEvent(make_mouse(
-                MouseEventKind::VertWheel(delta / 120),
-                wparam,
-                lparam,
-            )));
+            // Accumulate against the carried remainder and emit one notch per
+            // whole WHEEL_DELTA (120). Precision touchpads and free-spin mice
+            // report many sub-120 steps; flooring each to zero would drop them
+            // and make scrolling feel unresponsive. Truncation toward zero keeps
+            // this correct in both directions. Hold the borrow only long enough
+            // to update the remainder (the dispatch below may reenter the proc).
+            let notches = {
+                let mut inner = inner_rc.borrow_mut();
+                let accumulated = inner.wheel_remainder as i32 + delta as i32;
+                inner.wheel_remainder = (accumulated % 120) as i16;
+                (accumulated / 120) as i16
+            };
+            if notches != 0 {
+                // Unlike the button/move messages, WM_MOUSEWHEEL reports the
+                // pointer position in *screen* coordinates. Convert to client
+                // space so the GUI hit-tests the wheel against the correct pane
+                // / scrollbar; this matters whenever the window is not at the
+                // screen origin (e.g. maximized, multi-monitor) or has splits.
+                let mut pt = POINT {
+                    x: (lparam & 0xffff) as i16 as i32,
+                    y: ((lparam >> 16) & 0xffff) as i16 as i32,
+                };
+                ScreenToClient(hwnd, &mut pt);
+                let client_lparam =
+                    (((pt.y as u16 as u32) << 16) | (pt.x as u16 as u32)) as LPARAM;
+                events.dispatch(WindowEvent::MouseEvent(make_mouse(
+                    MouseEventKind::VertWheel(notches),
+                    wparam,
+                    client_lparam,
+                )));
+            }
             0
+        }
+        WM_SETTINGCHANGE => {
+            // A Light/Dark theme switch arrives as a settings change naming the
+            // "ImmersiveColorSet" area. Notify the GUI so it reloads the
+            // appearance-driven color scheme; the GUI is the single source of
+            // truth for the title-bar theme and pushes the resolved value back
+            // via set_window_titlebar_dark (so a user-forced scheme is honored
+            // rather than overridden by the OS theme here).
+            if setting_change_is_immersive_color(lparam) {
+                events.dispatch(WindowEvent::AppearanceChanged(conn.get_appearance()));
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_CLOSE => {
             events.dispatch(WindowEvent::CloseRequested);
@@ -570,9 +672,9 @@ unsafe extern "system" fn wnd_proc(
 
 /// Build a `MouseEvent` from a mouse message's `wparam`/`lparam`.
 ///
-/// Note: for `WM_MOUSEWHEEL`, `lparam` holds screen (not client) coordinates;
-/// that is a minor inaccuracy for hit-testing the wheel target and can be
-/// refined with `ScreenToClient` later.
+/// `lparam` must hold *client* coordinates. The button/move messages already
+/// do; `WM_MOUSEWHEEL` reports screen coordinates, so its handler converts via
+/// `ScreenToClient` before calling here.
 fn make_mouse(kind: MouseEventKind, wparam: WPARAM, lparam: LPARAM) -> MouseEvent {
     let x = (lparam & 0xffff) as i16 as isize;
     let y = ((lparam >> 16) & 0xffff) as i16 as isize;
@@ -675,6 +777,13 @@ impl WindowOps for Window {
         let wide_title = wide(title);
         self.run_on_main_with_hwnd(move |hwnd| unsafe {
             SetWindowTextW(hwnd, wide_title.as_ptr());
+        });
+    }
+
+    fn set_window_titlebar_dark(&self, dark: bool) {
+        self.run_on_main_with_hwnd(move |hwnd| {
+            log::debug!("set_window_titlebar_dark: applying dark={dark}");
+            set_titlebar_dark_mode(hwnd, dark);
         });
     }
 

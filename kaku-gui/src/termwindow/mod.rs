@@ -1085,6 +1085,12 @@ pub struct TermWindow {
     pending_config_reload_after_resize: bool,
     silent_reload_queued: bool,
     last_handled_appearance: Option<Appearance>,
+    /// Last light/dark value pushed to the native title bar (Windows). Avoids
+    /// redundant DWM calls and keeps the GUI the single source of truth.
+    last_titlebar_dark: Option<bool>,
+    /// Global config generation last checked for the title-bar theme, so the
+    /// paint loop only re-evaluates it when the config actually reloaded.
+    last_titlebar_config_gen: usize,
     deferred_layout_relayout_epoch: usize,
     layout_sticky_fullscreen_until: Option<Instant>,
     closed_tab_history: std::collections::VecDeque<PathBuf>,
@@ -1608,6 +1614,8 @@ impl TermWindow {
             pending_config_reload_after_resize: false,
             silent_reload_queued: false,
             last_handled_appearance: None,
+            last_titlebar_dark: None,
+            last_titlebar_config_gen: 0,
             deferred_layout_relayout_epoch: 0,
             layout_sticky_fullscreen_until: None,
             closed_tab_history: std::collections::VecDeque::new(),
@@ -2900,6 +2908,34 @@ impl TermWindow {
                 .replace(config::TermConfig::new().color_palette());
         }
         self.palette.as_ref().unwrap()
+    }
+
+    /// Match the native (system-drawn) title bar's light/dark presentation to
+    /// Kaku's effective background. No-op on platforms whose WindowOps leaves
+    /// `set_window_titlebar_dark` as the default (e.g. macOS draws its own).
+    /// Deduplicated so we only touch the OS when the value actually changes.
+    fn sync_titlebar_appearance(&mut self) {
+        // Match the native title bar to the active pane's *live* background.
+        // Reading the pane palette (rather than the cached window palette)
+        // reflects the current config even on platforms where the per-window
+        // config-reload handler doesn't run and the renderer instead reads
+        // colors fresh each frame. Deduplicated so we only touch the OS on a
+        // real change.
+        let dark = match self.get_active_pane_or_overlay() {
+            Some(pane) => !is_light_color(&pane.palette().background),
+            None => !is_light_color(&self.palette().background),
+        };
+        if self.last_titlebar_dark == Some(dark) {
+            return;
+        }
+        self.last_titlebar_dark = Some(dark);
+        log::debug!(
+            "native title bar -> {}",
+            if dark { "dark" } else { "light" }
+        );
+        if let Some(window) = self.window.clone() {
+            window.set_window_titlebar_dark(dark);
+        }
     }
 
     pub fn config_was_reloaded(&mut self) {

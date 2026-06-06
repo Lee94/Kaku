@@ -7,7 +7,9 @@ use ::window::{
     MouseButtons as WMB, MouseCursor, MouseEvent, MouseEventKind as WMEK, MousePress, WindowOps,
     WindowState,
 };
-use config::keyassignment::{KeyAssignment, MouseEventTrigger, SpawnTabDomain};
+use config::keyassignment::{
+    KeyAssignment, LauncherActionArgs, LauncherFlags, MouseEventTrigger, SpawnTabDomain,
+};
 use config::{MouseEventAltScreen, SelectionWheelScrollBehavior};
 use mux::pane::{CachePolicy, Pane, WithPaneLines};
 use mux::tab::SplitDirection;
@@ -1042,7 +1044,14 @@ impl super::TermWindow {
         };
         let action = match button {
             MousePress::Left => Some(KeyAssignment::SpawnTab(SpawnTabDomain::CurrentPaneDomain)),
-            MousePress::Right => None,
+            // Right-click opens a shell picker built from `launch_menu`, so a
+            // new terminal can be launched with a chosen shell. Left-click keeps
+            // spawning the default shell (pwsh on Windows).
+            MousePress::Right => Some(KeyAssignment::ShowLauncherArgs(LauncherActionArgs {
+                flags: LauncherFlags::LAUNCH_MENU_ITEMS | LauncherFlags::FUZZY,
+                title: Some("Select shell".to_string()),
+                ..Default::default()
+            })),
             MousePress::Middle => None,
         };
 

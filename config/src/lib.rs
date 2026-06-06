@@ -765,11 +765,45 @@ if package.config:sub(1, 1) == '\\' then
   if config.front_end == nil then
     config.front_end = 'WebGpu'
   end
-  -- Hide the native title bar and let Kaku draw its own (tab bar + integrated
-  -- min/max/close buttons), matching the macOS look. Set this to 'TITLE|RESIZE'
-  -- in your config to get the system title bar back.
+  -- Use the native Windows title bar (it follows the system Light/Dark theme
+  -- and Kaku's color scheme via DWM immersive dark mode). Set this to
+  -- 'RESIZE|INTEGRATED_BUTTONS' to instead let Kaku draw its own title bar with
+  -- the tab bar + integrated min/max/close buttons (the macOS-style look).
   if config.window_decorations == nil then
-    config.window_decorations = 'RESIZE|INTEGRATED_BUTTONS'
+    config.window_decorations = 'TITLE|RESIZE'
+  end
+  -- Show a draggable scrollbar on the right edge. WezTerm hides it by default;
+  -- on Windows we default it on so scrollback is discoverable. Set to false to hide.
+  if config.enable_scroll_bar == nil then
+    config.enable_scroll_bar = true
+  end
+  -- New terminals: default to PowerShell 7 (pwsh) when installed, and build a
+  -- shell picker (right-click the "+" new-tab button) from the shells found
+  -- below. Left-click "+" spawns the default. Edit/extend these freely.
+  local function file_exists(p)
+    local f = p and io.open(p, 'r')
+    if f then f:close(); return true end
+    return false
+  end
+  local program_files = os.getenv('ProgramFiles') or 'C:\\Program Files'
+  local system_root = os.getenv('SystemRoot') or 'C:\\Windows'
+  local pwsh = program_files .. '\\PowerShell\\7\\pwsh.exe'
+  local win_ps = system_root .. '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+  local git_bash = program_files .. '\\Git\\bin\\bash.exe'
+  if config.launch_menu == nil then
+    config.launch_menu = {}
+    if file_exists(pwsh) then
+      table.insert(config.launch_menu, { label = 'PowerShell 7', args = { pwsh, '-NoLogo' } })
+    end
+    if file_exists(win_ps) then
+      table.insert(config.launch_menu, { label = 'Windows PowerShell', args = { win_ps, '-NoLogo' } })
+    end
+    if file_exists(git_bash) then
+      table.insert(config.launch_menu, { label = 'Git Bash', args = { git_bash, '-i', '-l' } })
+    end
+  end
+  if config.default_prog == nil and file_exists(pwsh) then
+    config.default_prog = { pwsh, '-NoLogo' }
   end
 end
 
